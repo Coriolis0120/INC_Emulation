@@ -101,7 +101,7 @@ struct convert<SwitchConfig> {
 
 struct controller_group{
     int id;
-    int world_size;
+    int world_size; // world_size 记录了有多少计算节点（即有多少个rank）
     uint32_t *ip_list; // index is rank
     static int group_num;
 
@@ -115,30 +115,30 @@ struct controller_group{
     }
 };
 
+// controller_communicator：管理一个 group 内的通信器，负责收集 QP 信息、计算路由并生成 YAML 拓扑
 struct controller_communicator{
-    controller_group *group;
-    int id;
-    uint32_t *qp_list;
-    std::vector<SwitchConfig> switches;
-    static int communicator_num;
+    controller_group *group;          // 指向所属 group（拥有 world_size 和 ip_list）
+    int id;                           // 通信器编号，自增
+    uint32_t *qp_list;                // 每个 rank 对应的 QP 编号数组，长度等于 group->world_size
+    std::vector<SwitchConfig> switches; // 计算后的交换机路由配置，将被序列化到 YAML
+    static int communicator_num;      // 用于生成唯一 id 的计数器
+
     controller_communicator(controller_group *g):group(g){
         qp_list = new uint32_t(g->world_size);
         id = ++communicator_num;
     }
 
+    // 根据当前全局拓扑 switch_topology 和已收集的 QP 信息，构造 YAML 需要的交换机路由描述
     void calculate_route(void *topology_info){
-        // generate the switches field
-        // now just write the fixed data
+        // 1) 初始化 switches: 为每台交换机创建 SwitchConfig，并填入本端端口信息
         printf("in function calculate_route\n");
         for(int i=0;i<TOPOLOGY_SIZE;++i){
             auto &info = switch_topology[i];
             std::cout << info.id << std::endl;
             std::cout << info.ports.size() << std::endl;
             SwitchConfig sc;
-            if(info.id==0){ sc.root = true;}
-            else {sc.root = false;}
+            sc.root = (info.id==0);   // 暂定 id=0 的交换机为 root
             sc.id = info.id;
-            int index;
             int j = 0;
             for(auto &port:info.ports){
                 ConnectionConfig cc;
@@ -148,36 +148,35 @@ struct controller_communicator{
                 std::cout << cc.my_mac << std::endl;
                 cc.my_name = port.name;
                 std::cout << cc.my_name << std::endl;
-                cc.my_port = 4791;
-                cc.my_qp = id+(j++); // it will be
+                cc.my_port = 4791;            // 默认业务端口
+                cc.my_qp = id+(j++);           // 临时占位：为交换机侧分配唯一 QP 编号
                 sc.connections.push_back(cc);
             }
             switches.push_back(sc);
         }
         
-        
         printf("in function calculate_route 151th line\n");
         printf("%ld\n", switches.size());
-        // idealy by calulation, below is in manual set.
+        // 2) 手工填充与主机 (rank) 的对端信息：目前为示例硬编码，后续应由算法计算
 
         char rankip[INET_ADDRSTRLEN];
         struct in_addr addr;
-        //rank 0
-        switches[0].connections[0].up = false;
+        // rank 0
+        switches[0].connections[0].up = false;   // false 表示对端是主机而非上级交换机
         switches[0].connections[0].host_id = 0;
         addr.s_addr = group->ip_list[0]; 
         inet_ntop(AF_INET, &addr, rankip, INET_ADDRSTRLEN); 
         switches[0].connections[0].peer_ip = rankip;
-        switches[0].connections[0].peer_mac = "52:54:00:9e:ed:87"; // ens4 need to config manually
+        switches[0].connections[0].peer_mac = "fa:16:3e:87:09:4c"; // vm1 eth1 MAC
         switches[0].connections[0].peer_port = 4791;
         switches[0].connections[0].peer_qp = qp_list[0];
-        //rank 1
+        // rank 1
         switches[0].connections[1].up = false;
         switches[0].connections[1].host_id = 1;
         addr.s_addr = group->ip_list[1]; 
         inet_ntop(AF_INET, &addr, rankip, INET_ADDRSTRLEN); 
         switches[0].connections[1].peer_ip = rankip;
-        switches[0].connections[1].peer_mac = "52:54:00:13:b0:a7"; // ens4 need to config manually
+        switches[0].connections[1].peer_mac = "fa:16:3e:7b:25:36"; // vm2 eth1 MAC
         switches[0].connections[1].peer_port = 4791;
         switches[0].connections[1].peer_qp = qp_list[1];
 
@@ -275,14 +274,15 @@ struct controller_communicator{
         printf("in function calculate_route 221th line\n");
 
 
-        generate_yaml();
+        generate_yaml(); // 3) 将 switches 序列化为 YAML 文件
     }
 
+    // 将当前 switches 写入 /home/ubuntu/topology.yaml
     void generate_yaml() {
         YAML::Node root;
         root["switches"] = switches;
         
-        std::ofstream fout("/home/ubuntu/topology.yaml");
+        std::ofstream fout("/root/topology.yaml");
         fout << root;
     }
 

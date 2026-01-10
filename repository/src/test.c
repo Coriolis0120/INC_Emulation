@@ -1,6 +1,7 @@
 #include "util.h"
 #include <stdio.h>
 
+// Sample IPv4/UDP Ethernet frame used to exercise the CRC helper.
 uint8_t pack[1024] = {
     0x52, 0x54, 0x00, 0xdf, 0x0c, 0x28, // src mac
     0x52, 0x54, 0x00, 0xba, 0xc7, 0x53, // dst mac
@@ -29,6 +30,7 @@ int main(){
     uint32_t crc = compute_icrc(0, pack);
     printf("icrc: 0x%08X\n", crc);
 
+    // Overwrite the reserved 4-byte trailer with the computed CRC.
     uint32_t* icrc = (uint32_t*)(pack + 62 - 4);
     *icrc = crc;
 

@@ -399,10 +399,11 @@ uint32_t build_eth_packet
     // 6. data
     if(type == PACKET_TYPE_DATA) {
         unsigned char* d = (unsigned char*)(dst_packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
-        // memcpy(d, data, data_len);
-        for(int i = 0; i < data_len / 4; i++) {
-            ((uint32_t*)d)[i] = htonl(((uint32_t*)data)[i]);
-        }
+        // 直接复制数据，不进行字节序转换（数据已经是网络字节序）
+        memcpy(d, data, data_len);
+        // for(int i = 0; i < data_len / 4; i++) {
+        //     ((uint32_t*)d)[i] = htonl(((uint32_t*)data)[i]);
+        // }
     }
 
     // 7. reth

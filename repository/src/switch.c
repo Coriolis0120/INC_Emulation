@@ -480,7 +480,17 @@ void down_ack_handler(aeth_t* aeth, rule_t* rule, int psn) {
 
 void add_payload(uint32_t *restrict dst, const uint32_t *restrict src, int len) {
     for (int i = 0; i < len; i++) {
-        dst[i] += src[i];
+        // 将网络字节序转换为主机字节序，进行加法，再转回网络字节序
+        uint32_t dst_host = ntohl(dst[i]);
+        uint32_t src_host = ntohl(src[i]);
+        uint32_t result = dst_host + src_host;
+        dst[i] = htonl(result);
+
+        // 打印前几个元素的调试信息
+        if (i < 3) {
+            printf("add_payload[%d]: dst_net=0x%08x dst_host=%u, src_net=0x%08x src_host=%u, sum=%u, result_net=0x%08x\n",
+                   i, ntohl(dst[i]), dst_host, src[i], src_host, result, dst[i]);
+        }
     }
 }
 
@@ -794,21 +804,21 @@ void *polling_thread(void *arg) {
 
 
 int main(int argc, char *argv[]) {
-    char *controller_ip;
-    if(argc != 2) {
-        return -1;
-    } else {
-        controller_ip = argv[1];
-    }
-    
+    // char *controller_ip;
+    // if(argc != 2) {
+    //     return -1;
+    // } else {
+    //     controller_ip = argv[1];
+    // }
+    char * controller_ip = "192.168.0.3";
 
-    if (log_init("/home/ubuntu/switch.log") != 0) {
+    if (log_init(NULL) != 0) {
         fprintf(stderr, "Failed to open log file\n");
         return 1;
     }
 
     init_all(controller_ip);
-    printf("init finish");
+    printf("init finish\n");
     pthread_t receivers[FAN_IN + 1];
     pthread_t polling;
 
