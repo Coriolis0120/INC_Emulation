@@ -1,0 +1,59 @@
+---- Controller Log ----
+waiting for switch 0 to connect...
+connect with switches success.
+waiting for rank0 to connect...
+New connection from: 192.168.0.6:38182
+waiting for rank0 to connect...
+begin to recv from rank0.
+recv the ip 83890348.
+recv the ip 117443082.
+begin to recv from rank0.
+recv the qp num 18.
+recv the qp num 43.
+in function calculate_route
+0
+2
+172.16.0.21
+fa:16:3e:9a:26:99
+eth1
+10.10.0.14
+fa:16:3e:3d:ab:78
+eth2
+in function calculate_route 151th line
+1
+in function calculate_route 221th line
+route_calculated
+send id to switches.
+send file to fd: 4 succeed.
+send file to fd: 6 succeed.
+begin to recv from rank0.
+recv the qp num 2.
+recv the qp num 32533.
+in function calculate_route
+0
+2
+172.16.0.21
+fa:16:3e:9a:26:99
+eth1
+10.10.0.14
+fa:16:3e:3d:ab:78
+eth2
+in function calculate_route 151th line
+1
+in function calculate_route 221th line
+route_calculated
+send id to switches.
+send file to fd: 4 succeed.
+send file to fd: 6 succeed.
+begin to recv from rank0.
+recv the qp num 2.
+recv the qp num 32533.
+in function calculate_route
+0
+2
+172.16.0.21
+fa:16:3e:9a:26:99
+eth1
+10.10.0.14
+fa:16:3e:3d:ab:78
+eth2

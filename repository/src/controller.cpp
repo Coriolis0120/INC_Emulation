@@ -74,20 +74,29 @@ static void group_session(int client_fd) {
     // 持续处理来自同一 rank0 的控制请求：先建立 group，再可能建立多个 communicator
     while (true) {
         // 读取 1 字节请求类型（'G'：创建组；'C'：创建通信器并分发路由）
+        
         bytes = recv(client_fd, &req_type, 1, MSG_WAITALL);
         printf("begin to recv from rank0.\n");
         if(req_type == 'G'){
+            printf("recv the group creation request.\n");
             // 组控制：收集 world_size 和各节点 IP，分配 group id 返回给 rank0
             bytes = recv(client_fd, &world_size, sizeof(int), MSG_WAITALL);
             group = new controller_group(world_size);
             for (int i = 0; i < world_size; ++i) {
                 recv(client_fd, &group->ip_list[i], sizeof(uint32_t), MSG_WAITALL);
-                printf("recv the ip %d.\n",group->ip_list[i]);
+                // Convert from network byte order (big-endian) to host byte order
+                uint32_t ip_addr = ntohl(group->ip_list[i]);
+                printf("recv the ip %d.%d.%d.%d.\n",
+                       (ip_addr >> 24) & 0xFF,
+                       (ip_addr >> 16) & 0xFF,
+                       (ip_addr >> 8) & 0xFF,
+                       ip_addr & 0xFF);
             }
             send(client_fd, &group->id, sizeof(uint32_t), 0); // 将 group id 返给 rank0
 
         }
         else if(req_type == 'C'){
+            printf("recv the communicator creation request.\n");
             // 通信器控制：收集各 rank 的 QP 编号，计算路由并将拓扑下发到交换机和 rank0
             controller_communicator *comm = new controller_communicator(group);
             comms.push_back(comm);
@@ -96,7 +105,7 @@ static void group_session(int client_fd) {
                 recv(client_fd, &comm->qp_list[i], sizeof(uint32_t), MSG_WAITALL);
                 printf("recv the qp num %d.\n",comm->qp_list[i]);
             }
-            
+            printf("all qp nums received.\n");
             // 计算路由并生成 YAML（/home/ubuntu/topology.yaml）
             comm->calculate_route(switch_topology);
             printf("route_calculated\n");

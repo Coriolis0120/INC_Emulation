@@ -18,3 +18,14 @@ ssh controller "pkill -f './controller'"
 
 echo ""
 echo "=== All processes stopped ==="
+
+echo "=== Cleaning Local Logs ==="
+echo ""
+
+rm -f ./logs/vm1.log
+rm -f ./logs/vm2.log
+rm -f ./logs/switch.log
+rm -f ./logs/controller.log
+
+echo ""
+echo "=== Logs cleaned ==="

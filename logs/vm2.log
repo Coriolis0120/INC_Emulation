@@ -1,0 +1,53 @@
+---- VM2 Log ----
+world_size: 2, master_addr: 192.168.0.6, rank: 1
+devices num 1
+rxe_eth1
+my ip: 117443082
+connect to master success.
+my QP number = 43
+File received and saved to: /root/NetLab/topology.yaml
+parse yaml
+Remote QP number = 0xc
+Remote GID = 00:00:00:00:00:00:00:00:00:00:ff:ff:0a:0a:00:0e
+ret of init 0
+mtu: 3
+ret of rtr 0
+qp status: 2
+ret of rts 0
+start...
+i: 0, post recv ret 0
+i: 1, post recv ret 0
+i: 2, post recv ret 0
+i: 3, post recv ret 0
+send success
+receive success
+recv[0][0]: net=0x00000000, host=0, stored=0
+recv[0][1]: net=0x03000000, host=3, stored=3
+recv[0][2]: net=0x06000000, host=6, stored=6
+send success
+receive success
+recv[1][0]: net=0x000c0000, host=3072, stored=3072
+recv[1][1]: net=0x030c0000, host=3075, stored=3075
+recv[1][2]: net=0x060c0000, host=3078, stored=3078
+send success
+receive success
+recv[2][0]: net=0x00180000, host=6144, stored=6144
+recv[2][1]: net=0x03180000, host=6147, stored=6147
+recv[2][2]: net=0x06180000, host=6150, stored=6150
+send success
+receive success
+recv[3][0]: net=0x00240000, host=9216, stored=9216
+recv[3][1]: net=0x03240000, host=9219, stored=9219
+recv[3][2]: net=0x06240000, host=9222, stored=9222
+over, Time taken: 1.797000 mileseconds
+idx: 0, in data: 0, reduce data: 0, expected: 0
+idx: 1, in data: 2, reduce data: 3, expected: 3
+idx: 2, in data: 4, reduce data: 6, expected: 6
+idx: 3, in data: 6, reduce data: 9, expected: 9
+idx: 4, in data: 8, reduce data: 12, expected: 12
+idx: 5, in data: 10, reduce data: 15, expected: 15
+idx: 6, in data: 12, reduce data: 18, expected: 18
+idx: 7, in data: 14, reduce data: 21, expected: 21
+idx: 8, in data: 16, reduce data: 24, expected: 24
+idx: 9, in data: 18, reduce data: 27, expected: 27
+result ok

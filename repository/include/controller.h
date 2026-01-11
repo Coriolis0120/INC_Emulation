@@ -271,13 +271,13 @@ struct controller_communicator{
         // switches[2].connections[2].peer_port = 4791;
         // switches[2].connections[2].peer_qp = id;
         
-        printf("in function calculate_route 221th line\n");
+        
 
 
         generate_yaml(); // 3) 将 switches 序列化为 YAML 文件
     }
 
-    // 将当前 switches 写入 /home/ubuntu/topology.yaml
+    // 将当前 switches 写入 /root/topology.yaml 文件
     void generate_yaml() {
         YAML::Node root;
         root["switches"] = switches;

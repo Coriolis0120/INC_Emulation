@@ -1,32 +1,54 @@
 #!/bin/bash
 # Manual test script - start components step by step
+./stop_inc.sh
+echo "Building and transporting binaries..."
+./build_and_transport.sh
 
 echo "=== Step 1: Starting Controller ==="
-ssh controller "cd /root && ./controller 2>&1" &
-CONTROLLER_PID=$!
-sleep 3
+ssh controller "cd /root && ./controller > /root/controller.log" &
+sleep 2
 
 echo ""
 echo "=== Step 2: Starting Switch ==="
-ssh switch "cd /root && ./switch 192.168.0.3 2>&1" &
-SWITCH_PID=$!
-sleep 3
+ssh switch "cd /root && ./switch  > /root/switch.log" &
+sleep 2
 
 echo ""
 echo "=== Step 3: Starting VM1 (rank 0) ==="
-ssh vm1 "cd /root && ./host 2 192.168.0.3 0 2>&1" &
-VM1_PID=$!
+ssh vm1 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host 2 192.168.0.6 0 > /root/vm1.log" &
 sleep 2
 
 echo ""
 echo "=== Step 4: Starting VM2 (rank 1) ==="
-ssh vm2 "cd /root && ./host 2 192.168.0.3 1 2>&1" &
-VM2_PID=$!
+ssh vm2 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host 2 192.168.0.6 1 > /root/vm2.log" &
 
 echo ""
 echo "=== Waiting for completion (30 seconds) ==="
-sleep 30
+sleep 5
 
 echo ""
 echo "=== Cleaning up ==="
-kill $CONTROLLER_PID $SWITCH_PID $VM1_PID $VM2_PID 2>/dev/null
+./stop_inc.sh
+echo "All components stopped."
+
+
+echo "logs:"
+echo "---- Controller Log ----" > ./logs/controller.log
+ssh controller "cat /root/controller.log" >> ./logs/controller.log
+
+
+echo "---- Switch Log ----" > ./logs/switch.log
+ssh switch "cat /root/switch.log" >> ./logs/switch.log
+
+echo "---- VM1 Log ----" > ./logs/vm1.log
+ssh vm1 "cat /root/vm1.log" >> ./logs/vm1.log
+
+echo "---- VM2 Log ----" > ./logs/vm2.log
+ssh vm2 "cat /root/vm2.log" >> ./logs/vm2.log
+
+sleep 5
+
+cat ./logs/controller.log
+cat ./logs/switch.log
+cat ./logs/vm1.log
+cat ./logs/vm2.log

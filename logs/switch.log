@@ -1,0 +1,102 @@
+---- Switch Log ----
+Connected to 192.168.0.3:52311
+recv switch id 0
+File received and saved to: /home/ubuntu/topology.yaml
+  Device:           eth1
+  My MAC:           FA:16:3E:9A:26:99
+  Peer MAC:         FA:16:3E:87:09:4C
+  My IP:            172.16.0.21
+  Peer IP:          172.16.0.5
+  My Port:          4791
+  Peer Port:        4791
+  My QP:            11
+  Peer QP:          18
+  PSN:              0
+  Device:           eth2
+  My MAC:           FA:16:3E:3D:AB:78
+  Peer MAC:         FA:16:3E:7B:25:36
+  My IP:            10.10.0.14
+  Peer IP:          10.10.0.7
+  My Port:          4791
+  Peer Port:        4791
+  My QP:            12
+  Peer QP:          43
+  PSN:              0
+init finish
+thread 0 start...
+thread 1 start...
+================================================
+================================================
+add_payload[0]: dst_net=0x00000000 dst_host=0, src_net=0x00000000 src_host=0, sum=0, result_net=0x00000000
+add_payload[1]: dst_net=0x00000001 dst_host=0, src_net=0x01000000 src_host=1, sum=1, result_net=0x01000000
+add_payload[2]: dst_net=0x00000002 dst_host=0, src_net=0x02000000 src_host=2, sum=2, result_net=0x02000000
+add_payload[0]: dst_net=0x00000100 dst_host=0, src_net=0x00010000 src_host=256, sum=256, result_net=0x00010000
+add_payload[1]: dst_net=0x00000101 dst_host=0, src_net=0x01010000 src_host=257, sum=257, result_net=0x01010000
+add_payload[2]: dst_net=0x00000102 dst_host=0, src_net=0x02010000 src_host=258, sum=258, result_net=0x02010000
+add_payload[0]: dst_net=0x00000200 dst_host=0, src_net=0x00020000 src_host=512, sum=512, result_net=0x00020000
+add_payload[1]: dst_net=0x00000201 dst_host=0, src_net=0x01020000 src_host=513, sum=513, result_net=0x01020000
+add_payload[2]: dst_net=0x00000202 dst_host=0, src_net=0x02020000 src_host=514, sum=514, result_net=0x02020000
+add_payload[0]: dst_net=0x00000300 dst_host=0, src_net=0x00030000 src_host=768, sum=768, result_net=0x00030000
+add_payload[1]: dst_net=0x00000301 dst_host=0, src_net=0x01030000 src_host=769, sum=769, result_net=0x01030000
+add_payload[2]: dst_net=0x00000302 dst_host=0, src_net=0x02030000 src_host=770, sum=770, result_net=0x02030000
+add_payload[0]: dst_net=0x00000400 dst_host=0, src_net=0x00040000 src_host=1024, sum=1024, result_net=0x00040000
+add_payload[1]: dst_net=0x00000401 dst_host=0, src_net=0x01040000 src_host=1025, sum=1025, result_net=0x01040000
+add_payload[2]: dst_net=0x00000402 dst_host=0, src_net=0x02040000 src_host=1026, sum=1026, result_net=0x02040000
+add_payload[0]: dst_net=0x00000500 dst_host=0, src_net=0x00050000 src_host=1280, sum=1280, result_net=0x00050000
+add_payload[1]: dst_net=0x00000501 dst_host=0, src_net=0x01050000 src_host=1281, sum=1281, result_net=0x01050000
+add_payload[2]: dst_net=0x00000502 dst_host=0, src_net=0x02050000 src_host=1282, sum=1282, result_net=0x02050000
+add_payload[0]: dst_net=0x00000600 dst_host=0, src_net=0x00060000 src_host=1536, sum=1536, result_net=0x00060000
+add_payload[1]: dst_net=0x00000601 dst_host=0, src_net=0x01060000 src_host=1537, sum=1537, result_net=0x01060000
+add_payload[2]: dst_net=0x00000602 dst_host=0, src_net=0x02060000 src_host=1538, sum=1538, result_net=0x02060000
+add_payload[0]: dst_net=0x00000700 dst_host=0, src_net=0x00070000 src_host=1792, sum=1792, result_net=0x00070000
+add_payload[1]: dst_net=0x00000701 dst_host=0, src_net=0x01070000 src_host=1793, sum=1793, result_net=0x01070000
+add_payload[2]: dst_net=0x00000702 dst_host=0, src_net=0x02070000 src_host=1794, sum=1794, result_net=0x02070000
+add_payload[0]: dst_net=0x00000000 dst_host=0, src_net=0x00000000 src_host=0, sum=0, result_net=0x00000000
+add_payload[1]: dst_net=0x00000003 dst_host=1, src_net=0x02000000 src_host=2, sum=3, result_net=0x03000000
+add_payload[2]: dst_net=0x00000006 dst_host=2, src_net=0x04000000 src_host=4, sum=6, result_net=0x06000000
+broadcast... psn: 0
+add_payload[0]: dst_net=0x00000300 dst_host=256, src_net=0x00020000 src_host=512, sum=768, result_net=0x00030000
+add_payload[1]: dst_net=0x00000303 dst_host=257, src_net=0x02020000 src_host=514, sum=771, result_net=0x03030000
+add_payload[2]: dst_net=0x00000306 dst_host=258, src_net=0x04020000 src_host=516, sum=774, result_net=0x06030000
+broadcast... psn: 1
+add_payload[0]: dst_net=0x00000600 dst_host=512, src_net=0x00040000 src_host=1024, sum=1536, result_net=0x00060000
+add_payload[1]: dst_net=0x00000603 dst_host=513, src_net=0x02040000 src_host=1026, sum=1539, result_net=0x03060000
+add_payload[2]: dst_net=0x00000606 dst_host=514, src_net=0x04040000 src_host=1028, sum=1542, result_net=0x06060000
+broadcast... psn: 2
+add_payload[0]: dst_net=0x00000900 dst_host=768, src_net=0x00060000 src_host=1536, sum=2304, result_net=0x00090000
+add_payload[1]: dst_net=0x00000903 dst_host=769, src_net=0x02060000 src_host=1538, sum=2307, result_net=0x03090000
+add_payload[2]: dst_net=0x00000906 dst_host=770, src_net=0x04060000 src_host=1540, sum=2310, result_net=0x06090000
+broadcast... psn: 3
+add_payload[0]: dst_net=0x00000c00 dst_host=1024, src_net=0x00080000 src_host=2048, sum=3072, result_net=0x000c0000
+add_payload[1]: dst_net=0x00000c03 dst_host=1025, src_net=0x02080000 src_host=2050, sum=3075, result_net=0x030c0000
+add_payload[2]: dst_net=0x00000c06 dst_host=1026, src_net=0x04080000 src_host=2052, sum=3078, result_net=0x060c0000
+broadcast... psn: 4
+add_payload[0]: dst_net=0x00000f00 dst_host=1280, src_net=0x000a0000 src_host=2560, sum=3840, result_net=0x000f0000
+add_payload[1]: dst_net=0x00000f03 dst_host=1281, src_net=0x020a0000 src_host=2562, sum=3843, result_net=0x030f0000
+add_payload[2]: dst_net=0x00000f06 dst_host=1282, src_net=0x040a0000 src_host=2564, sum=3846, result_net=0x060f0000
+broadcast... psn: 5
+add_payload[0]: dst_net=0x00000800 dst_host=0, src_net=0x00080000 src_host=2048, sum=2048, result_net=0x00080000
+add_payload[1]: dst_net=0x00000801 dst_host=0, src_net=0x01080000 src_host=2049, sum=2049, result_net=0x01080000
+add_payload[2]: dst_net=0x00000802 dst_host=0, src_net=0x02080000 src_host=2050, sum=2050, result_net=0x02080000
+add_payload[0]: dst_net=0x00000900 dst_host=0, src_net=0x00090000 src_host=2304, sum=2304, result_net=0x00090000
+add_payload[1]: dst_net=0x00000901 dst_host=0, src_net=0x01090000 src_host=2305, sum=2305, result_net=0x01090000
+add_payload[2]: dst_net=0x00000902 dst_host=0, src_net=0x02090000 src_host=2306, sum=2306, result_net=0x02090000
+add_payload[0]: dst_net=0x00000a00 dst_host=0, src_net=0x000a0000 src_host=2560, sum=2560, result_net=0x000a0000
+add_payload[1]: dst_net=0x00000a01 dst_host=0, src_net=0x010a0000 src_host=2561, sum=2561, result_net=0x010a0000
+add_payload[2]: dst_net=0x00000a02 dst_host=0, src_net=0x020a0000 src_host=2562, sum=2562, result_net=0x020a0000
+add_payload[0]: dst_net=0x00000b00 dst_host=0, src_net=0x000b0000 src_host=2816, sum=2816, result_net=0x000b0000
+add_payload[1]: dst_net=0x00000b01 dst_host=0, src_net=0x010b0000 src_host=2817, sum=2817, result_net=0x010b0000
+add_payload[2]: dst_net=0x00000b02 dst_host=0, src_net=0x020b0000 src_host=2818, sum=2818, result_net=0x020b0000
+add_payload[0]: dst_net=0x00001200 dst_host=1536, src_net=0x000c0000 src_host=3072, sum=4608, result_net=0x00120000
+add_payload[1]: dst_net=0x00001203 dst_host=1537, src_net=0x020c0000 src_host=3074, sum=4611, result_net=0x03120000
+add_payload[2]: dst_net=0x00001206 dst_host=1538, src_net=0x040c0000 src_host=3076, sum=4614, result_net=0x06120000
+broadcast... psn: 6
+add_payload[0]: dst_net=0x00001500 dst_host=1792, src_net=0x000e0000 src_host=3584, sum=5376, result_net=0x00150000
+add_payload[1]: dst_net=0x00001503 dst_host=1793, src_net=0x020e0000 src_host=3586, sum=5379, result_net=0x03150000
+add_payload[2]: dst_net=0x00001506 dst_host=1794, src_net=0x040e0000 src_host=3588, sum=5382, result_net=0x06150000
+broadcast... psn: 7
+add_payload[0]: dst_net=0x00001800 dst_host=2048, src_net=0x00100000 src_host=4096, sum=6144, result_net=0x00180000
+add_payload[1]: dst_net=0x00001803 dst_host=2049, src_net=0x02100000 src_host=4098, sum=6147, result_net=0x03180000
+add_payload[2]: dst_net=0x00001806 dst_host=2050, src_net=0x04100000 src_host=4100, sum=6150, result_net=0x06180000
+broadcast... psn: 8
+add_payload[0]: dst_net=0x00001b00 dst_host=2304, src_net=0x00120000 src_host=4
