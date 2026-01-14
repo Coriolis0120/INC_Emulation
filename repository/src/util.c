@@ -546,3 +546,18 @@ void receive_file(int sockfd, const char *save_path) {
     fclose(file);
     printf("File received and saved to: %s\n", save_path);
 }
+
+// 将大端法uint32_t以IP格式转换为字符串
+char* uint32_to_ip_string_big_endian(uint32_t value) {
+    // 分配稳定的字符数组，IP格式最多15字符
+    static char buffer[16];
+
+    
+    snprintf(buffer, sizeof(buffer), "%d.%d.%d.%d",
+        value & 0xFF,   //       
+        (value >> 8) & 0xFF,   
+        (value >> 16) & 0xFF,    
+        (value >> 24) & 0xFF);          
+
+    return buffer;
+}

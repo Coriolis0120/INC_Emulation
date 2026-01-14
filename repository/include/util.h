@@ -135,5 +135,8 @@ uint32_t crc32(const void *data, size_t length);
 void send_file_with_length(int fd, const char *file_path) ;
 void receive_file(int sockfd, const char *save_path) ;
 
+// 将大端法uint32_t以IP格式转换为字符串（分解为四个字节）
+char* uint32_to_ip_string_big_endian(uint32_t value);
+
 #endif // UTIL_H
 

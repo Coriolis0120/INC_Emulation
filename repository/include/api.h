@@ -36,8 +36,8 @@
 #define GID_IDX 1
 
 #define WINDOW_SIZE 8192 //in bytes
-#define MESSAGE_SIZE (4 * (PAYLOAD_LEN)) // tradeoff between window shift efficiency and the overhead of posting send 
-#define PAYLOAD_COUNT ((MESSAGE_SIZE) / (sizeof(int))) // 元素个数
+#define MESSAGE_SIZE (4 * (PAYLOAD_LEN)) // 在一条信息中的字节数
+#define PAYLOAD_COUNT ((MESSAGE_SIZE) / (sizeof(int))) // 在一条信息中的uint32_t数量
 
 struct inccl_group{
     // group info
@@ -45,10 +45,13 @@ struct inccl_group{
     int rank;
     int world_size;
 
+    // rank 0存储controller IP，其他rank存储master IP
     union{
         const char *controller_ip;
         const char *master_ip;
     };
+
+    // rank 0存储与controller的连接，其他rank存储与master的连接
 
     union{
         int controller_fd; // for rank0
@@ -56,7 +59,9 @@ struct inccl_group{
     };
 
     int *group_fd_list; // size is world_size, for rank0 to broadcast info
+    // rank 0用于存储与其他所有rank的TCP连接
 
+    //IB/RDMA 相关信息
     // local info
     union ibv_gid local_gid;
     // int payload_mtu; // minus header length
@@ -99,3 +104,8 @@ int inccl_communicator_destroy(struct inccl_communicator *comm);
 void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
 
 void inccl_allreduce_write(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
+
+// Reduce operations: only root rank receives the aggregated result
+void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data, int root_rank);
+
+void inccl_reduce_write(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data, int root_rank);

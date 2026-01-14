@@ -1,0 +1,20 @@
+WR：我要干什么（任务）
+Work Request
+
+QP：任务通道（一发一收）
+Queue Pair
+
+SQ：我要发的任务排这里
+Send Queue
+
+RQ：我准备接收的坑位
+Receive Queue
+
+CQ：所有完成回执的垃圾桶
+Completion Queue
+
+WC：某个任务干完的结果单
+Work Completion
+
+MR: 你明确授权给网卡、允许它直接读写的一段内存
+Memeroy Region

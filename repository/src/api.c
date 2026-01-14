@@ -32,12 +32,45 @@ struct inccl_group *inccl_group_create(int world_size, int rank, const char *mas
     dev_list = NULL;
     // 查询设备属性（如最大QP数量、最大CQ数量等）
     ibv_query_device(group->local_ib_ctx, &group->local_device_attr);
+
+    // 打印设备属性信息
+    printf("\n===== Device Attributes =====\n");
+    printf("Maximum QPs: %d\n", group->local_device_attr.max_qp);
+    printf("Maximum CQs: %d\n", group->local_device_attr.max_cq);
+    printf("Maximum MRs: %d\n", group->local_device_attr.max_mr);
+    printf("Maximum PDs: %d\n", group->local_device_attr.max_pd);
+    printf("Maximum QP WR: %d\n", group->local_device_attr.max_qp_wr);
+    printf("Maximum CQ entries: %d\n", group->local_device_attr.max_cqe);
+    printf("Maximum MR size: %lu bytes\n", group->local_device_attr.max_mr_size);
+    printf("=============================\n\n");
+
     // 查询端口属性（如MTU、链路状态等）
     ibv_query_port(group->local_ib_ctx, group->local_ib_port, &group->local_port_attr);
+
+    // 打印端口属性信息
+    printf("\n===== Port Attributes =====\n");
+    printf("Port state: %d (0=DOWN, 1=INIT, 2=ARMED, 3=ACTIVE)\n", group->local_port_attr.state);
+    printf("Physical state: %d\n", group->local_port_attr.phys_state);
+    printf("LID: 0x%04x (%d)\n", group->local_port_attr.lid, group->local_port_attr.lid);
+    printf("Active MTU: %d (256*2^%d = %d bytes)\n",
+           group->local_port_attr.active_mtu,
+           group->local_port_attr.active_mtu,
+           256 * (1 << group->local_port_attr.active_mtu));
+    printf("Max MTU: %d (256*2^%d = %d bytes)\n",
+           group->local_port_attr.max_mtu,
+           group->local_port_attr.max_mtu,
+           256 * (1 << group->local_port_attr.max_mtu));
+    printf("Active speed: %d\n", group->local_port_attr.active_speed);
+    printf("Active width: %d (1=1x, 2=4x, 4=8x, 8=12x)\n", group->local_port_attr.active_width);
+    printf("GID table length: %d\n", group->local_port_attr.gid_tbl_len);
+    printf("Link layer: %d (0=IB, 1=Ethernet)\n", group->local_port_attr.link_layer);
+    printf("============================\n\n");
+
     // 查询GID（全局标识符，包含IP地址信息）
     ibv_query_gid(group->local_ib_ctx, group->local_ib_port, GID_IDX, &group->local_gid);
     // 打印本地IP地址（GID的最后4字节存储IPv4地址）
-    printf("my ip: %d\n", *(int *)(group->local_gid.raw+12));
+    char ip_str[INET_ADDRSTRLEN];
+    printf("my ip: %s\n", uint32_to_ip_string_big_endian(*(uint32_t *)(group->local_gid.raw+12)));
     fflush(stdout);  // 强制刷新输出缓冲区
     // group->payload_mtu = (2<<(group->local_port_attr.active_mtu + 7))-inccl_HEADER_LEN;
     // printf("group payload mtu: %d\n", group->payload_mtu);
@@ -55,6 +88,8 @@ struct inccl_group *inccl_group_create(int world_size, int rank, const char *mas
         uint32_t *group_ip_list = (uint32_t *)calloc(world_size, sizeof(uint32_t));
         // 先保存自己（rank0）的IP地址
         memcpy(group_ip_list, group->local_gid.raw+12, sizeof(uint32_t));
+        // *** 注意 *** //
+        // group_ip_list中存储的是ip的网络字节序表示！大端法！
 
         // ===== 步骤1：与其他所有rank建立TCP连接 =====
         int sockfd = socket(AF_INET, SOCK_STREAM, 0); // 创建TCP socket
@@ -446,6 +481,12 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
     int receive_num = 0;  // 已接收的消息数量
     int send_num = 0;     // 已发送的消息数量
     int message_num = len / PAYLOAD_COUNT; // 总消息数（每个消息包含PAYLOAD_COUNT个元素）
+    // 隐含约束：len必须是PAYLOAD_COUNT的整数倍
+    if (len % PAYLOAD_COUNT != 0) {
+        printf("Error: len must be a multiple of PAYLOAD_COUNT (%ld)\n", PAYLOAD_COUNT);
+        return;
+    }
+
 
     struct ibv_recv_wr rr;           // 接收工作请求
     struct ibv_sge receive_sge;      // 接收的Scatter-Gather元素
@@ -457,7 +498,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
         // 配置接收缓冲区的SGE
         memset(&receive_sge, 0, sizeof(receive_sge));
         receive_sge.addr = (uintptr_t)(comm->receive_payload + i * PAYLOAD_COUNT * sizeof(int32_t));  // 接收缓冲区地址
-        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);  // 接收数据长度
+        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);  // 接收数据长度(字节数)
         receive_sge.lkey = comm->mr_receive_payload->lkey;  // 本地MR的key
 
         // 配置接收工作请求
@@ -470,18 +511,22 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
         // 提交接收请求到接收队列
         int ret = ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
         printf("i: %d, post recv ret %d\n", i, ret);
+        fflush(stdout);
     }
 
     // ===== 步骤2：发送初始窗口内的消息 =====
     // 使用滑动窗口机制：先发送window_size范围内的消息
-    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE); i++) {
+    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE); i++) { // MESSAGE_SIZE = 4KB，代表一个payload的大小（字节数）
         post_send(comm, src_data, i, IBV_WR_SEND);  // 使用SEND操作
         send_num++;  // 增加已发送计数
     }
 
     // ===== 步骤3：轮询完成队列，处理完成事件 =====
     // 分配工作完成（Work Completion）数组
-    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num);
+    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num); 
+    // PAYLOAD_COUNT: 一个payload的元素大小（int32_t数量）
+    // message_num: 总消息有多少个payload
+
     // 循环直到接收到所有消息
     while(receive_num != message_num) {
         // 轮询完成队列，最多获取message_num个完成事件
@@ -497,7 +542,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
                 // 处理接收完成事件
                 if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_RECV) {
                     printf("receive success\n");
-
+                    fflush(stdout);
                     uint64_t idx = tmp->wr_id;  // 获取工作请求ID
                     // 获取接收缓冲区指针
                     int *pack = (int *)(comm->receive_payload + idx * PAYLOAD_COUNT * sizeof(int32_t));
@@ -526,6 +571,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
                 } else if(tmp->status==IBV_WC_SUCCESS) {
                     // 处理发送完成事件
                     printf("send success\n");
+                    fflush(stdout);
                     // if(send_num < message_num) {
                     //     post_send(comm, src_data, send_num);
                     //     send_num++;
@@ -533,9 +579,16 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
                 } else {
                     // 处理错误情况
                     printf("what???? wc status: %d, opcode: %d\n", tmp->status, tmp->opcode);
+                    fflush(stdout);
+                    return;
                 }
 
             }
+        }else if(result < 0) {
+            // 处理轮询错误
+            printf("ibv_poll_cq error: %d\n", result);
+            fflush(stdout);
+            return;
         }
     }
 }
@@ -549,40 +602,48 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
  * 与sendrecv的区别：RDMA WRITE不需要接收方预先post receive
  */
 void inccl_allreduce_write(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data) {
+    printf("allreduce write...\n");
     int receive_num = 0;  // 已接收的消息数量
     int send_num = 0;     // 已发送的消息数量
     int message_num = len / PAYLOAD_COUNT; // 总消息数
 
     // ===== 步骤1：发送初始窗口内的消息 =====
     // RDMA WRITE不需要预先post receive，直接发送即可
-    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE); i++) {
+    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE) && i < message_num; i++) {
+        printf("post send idx %d\n", i);
+        fflush(stdout);
         post_send(comm, src_data, i, IBV_WR_RDMA_WRITE);  // 使用RDMA_WRITE操作
         send_num++;
     }
+    printf("initial send done, send_num %d\n", send_num);
+    fflush(stdout); 
 
     // ===== 步骤2：轮询完成队列，处理完成事件 =====
     struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num);
     while(receive_num != message_num) {
+        
         // 轮询完成队列
         int result = ibv_poll_cq(comm->cq, message_num, wc);
+
         if(result > 0) {
             // 遍历所有完成事件
             for(int i = 0; i < result; i++){
                 struct ibv_wc *tmp = wc + i;
-                // printf("tmp->status %d\n", tmp->status);
-                // printf("tmp->opcode %d\n", tmp->opcode);
+                printf("tmp->status %d\n", tmp->status);
+                printf("tmp->opcode %d\n", tmp->opcode);
+                fflush(stdout);
 
                 // 处理RDMA WRITE完成事件
                 if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_RDMA_WRITE) {
                     printf("receive success\n");
-
+                    fflush(stdout);
                     uint64_t idx = tmp->wr_id;  // 获取工作请求ID
                     // 获取接收缓冲区指针（RDMA WRITE直接写入接收缓冲区）
                     int *pack = (int *)(comm->receive_payload + idx * PAYLOAD_COUNT * sizeof(int32_t));
 
                     // 将数据从接收缓冲区复制到目标缓冲区，并转换为主机字节序
                     for(int j = 0; j <PAYLOAD_COUNT; ++j){
-                        (dst_data + receive_num * PAYLOAD_COUNT)[j] = ntohl(pack[j]);
+                        (dst_data + idx * PAYLOAD_COUNT)[j] = ntohl(pack[j]);
                     }
 
                     //memcpy(dst_data + receive_num * PAYLOAD_COUNT, pack, PAYLOAD_COUNT * sizeof(int32_t));
@@ -596,6 +657,7 @@ void inccl_allreduce_write(struct inccl_communicator *comm, int32_t* src_data, u
                 } else if(tmp->status==IBV_WC_SUCCESS) {
                     // 处理其他成功的完成事件
                     printf("send success\n");
+                    fflush(stdout);
                     // if(send_num < message_num) {
                     //     post_send(comm, src_data, send_num);
                     //     send_num++;
@@ -603,9 +665,354 @@ void inccl_allreduce_write(struct inccl_communicator *comm, int32_t* src_data, u
                 } else {
                     // 处理错误情况
                     printf("what???? wc status: %d, opcode: %d\n", tmp->status, tmp->opcode);
+                    fflush(stdout);
                 }
 
             }
+        }else if (result == 0){
+            // 没有完成事件，继续轮询
+        } else {
+            // 处理轮询错误
+            printf("ibv_poll_cq error: %d\n", result);
+            fflush(stdout);
+            return;
+        }
+        
+        
+    }
+}
+
+/**
+ * @brief Reduce操作 - SEND/RECV模式
+ * 
+ * 所有节点发送数据到交换机进行聚合，但只有root_rank接收聚合结果
+ * 
+ * @param comm 通信器
+ * @param src_data 源数据缓冲区
+ * @param len 数据长度（int32_t元素个数）
+ * @param dst_data 目标数据缓冲区（仅root_rank使用）
+ * @param root_rank 接收聚合结果的根节点rank
+ */
+void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data, int root_rank) {
+    int receive_num = 0;  // 已接收的消息数量
+    int send_num = 0;     // 已发送的消息数量
+    int message_num = len / PAYLOAD_COUNT; // 总消息数
+    
+    // 检查len是否是PAYLOAD_COUNT的整数倍
+    if (len % PAYLOAD_COUNT != 0) {
+        printf("Error: len must be a multiple of PAYLOAD_COUNT (%ld)\n", PAYLOAD_COUNT);
+        return;
+    }
+
+    int my_rank = comm->group->rank;
+    bool is_root = (my_rank == root_rank);
+
+    struct ibv_recv_wr rr;
+    struct ibv_sge receive_sge;
+    struct ibv_recv_wr *receive_bad_wr;
+
+    // ===== 步骤1：仅root节点预先提交接收请求 =====
+    if (is_root) {
+        for(int i = 0; i < message_num; i++) {
+            memset(&receive_sge, 0, sizeof(receive_sge));
+            receive_sge.addr = (uintptr_t)(comm->receive_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
+            receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+            receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+            memset(&rr, 0, sizeof(rr));
+            rr.next = NULL;
+            rr.wr_id = i;
+            rr.sg_list = &receive_sge;
+            rr.num_sge = 1;
+
+            int ret = ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+            printf("Reduce root rank %d: post recv ret %d\n", my_rank, ret);
+            fflush(stdout);
         }
     }
+
+    // ===== 步骤2：所有节点发送数据（包含操作类型和root_rank元数据） =====
+    // 在发送缓冲区的前两个uint32_t存储元数据
+    int32_t *send_buffer = (int32_t*)comm->send_payload;
+    
+    // 准备发送数据：前两个元素是元数据，后面是实际数据
+    for(int i = 0; i < message_num; i++) {
+        int32_t *msg_buffer = send_buffer + i * PAYLOAD_COUNT;
+        
+        // 第一个元素：操作类型（OPERATION_REDUCE = 1）
+        msg_buffer[0] = htonl(1);  // OPERATION_REDUCE
+        // 第二个元素：root_rank
+        msg_buffer[1] = htonl(root_rank);
+        
+        // 复制实际数据（从第3个元素开始）
+        for(int j = 2; j < PAYLOAD_COUNT; j++) {
+            int src_idx = i * PAYLOAD_COUNT + (j - 2);
+            if(src_idx < len) {
+                msg_buffer[j] = htonl(src_data[src_idx]);
+            } else {
+                msg_buffer[j] = 0;  // 填充0
+            }
+        }
+    }
+
+    // 发送初始窗口内的消息
+    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE); i++) {
+        post_send(comm, send_buffer, i, IBV_WR_SEND);
+        send_num++;
+    }
+
+    // ===== 步骤3：轮询完成队列 =====
+    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num);
+
+    if (is_root) {
+        // Root节点需要接收结果
+        while(receive_num != message_num) {
+            int result = ibv_poll_cq(comm->cq, message_num, wc);
+            if(result > 0) {
+                for(int i = 0; i < result; i++){
+                    struct ibv_wc *tmp = wc + i;
+
+                    if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_RECV) {
+                        printf("Reduce root receive success\n");
+                        fflush(stdout);
+                        uint64_t idx = tmp->wr_id;
+                        int *pack = (int *)(comm->receive_payload + idx * PAYLOAD_COUNT * sizeof(int32_t));
+
+                        // 复制数据到目标缓冲区（跳过前两个元数据元素）
+                        for(int j = 2; j < PAYLOAD_COUNT; ++j){
+                            int dst_idx = idx * PAYLOAD_COUNT + (j - 2);
+                            if(dst_idx < len) {
+                                uint32_t net_val = pack[j];
+                                uint32_t host_val = ntohl(net_val);
+                                dst_data[dst_idx] = host_val;
+                            }
+                        }
+
+                        receive_num++;
+
+                        // 滑动窗口
+                        if(send_num < message_num) {
+                            post_send(comm, send_buffer, send_num, IBV_WR_SEND);
+                            send_num++;
+                        }
+                    } else if(tmp->status==IBV_WC_SUCCESS) {
+                        printf("Reduce root send success\n");
+                        fflush(stdout);
+                    } else {
+                        printf("Reduce root error: wc status: %d, opcode: %d\n", tmp->status, tmp->opcode);
+                        fflush(stdout);
+                        free(wc);
+                        return;
+                    }
+                }
+            } else if(result < 0) {
+                printf("Reduce root ibv_poll_cq error: %d\n", result);
+                fflush(stdout);
+                free(wc);
+                return;
+            }
+        }
+    } else {
+        // 非root节点只需要等待发送完成
+        int send_complete = 0;
+        while(send_complete < send_num) {
+            int result = ibv_poll_cq(comm->cq, message_num, wc);
+            if(result > 0) {
+                for(int i = 0; i < result; i++){
+                    struct ibv_wc *tmp = wc + i;
+
+                    if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_SEND) {
+                        printf("Reduce non-root rank %d send success\n", my_rank);
+                        fflush(stdout);
+                        send_complete++;
+                        
+                        // 滑动窗口
+                        if(send_num < message_num) {
+                            post_send(comm, send_buffer, send_num, IBV_WR_SEND);
+                            send_num++;
+                        }
+                    } else if(tmp->status!=IBV_WC_SUCCESS) {
+                        printf("Reduce non-root rank %d error: wc status: %d, opcode: %d\n", 
+                               my_rank, tmp->status, tmp->opcode);
+                        fflush(stdout);
+                        free(wc);
+                        return;
+                    }
+                }
+            } else if(result < 0) {
+                printf("Reduce non-root rank %d ibv_poll_cq error: %d\n", my_rank, result);
+                fflush(stdout);
+                free(wc);
+                return;
+            }
+        }
+    }
+
+    free(wc);
+    printf("Reduce operation completed for rank %d\n", my_rank);
+    fflush(stdout);
+}
+
+/**
+ * @brief Reduce操作 - RDMA WRITE模式
+ * 
+ * 所有节点发送数据到交换机进行聚合，但只有root_rank接收聚合结果
+ * 使用RDMA WRITE操作，性能更高
+ * 
+ * @param comm 通信器
+ * @param src_data 源数据缓冲区
+ * @param len 数据长度（int32_t元素个数）
+ * @param dst_data 目标数据缓冲区（仅root_rank使用）
+ * @param root_rank 接收聚合结果的根节点rank
+ */
+void inccl_reduce_write(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data, int root_rank) {
+    int receive_num = 0;
+    int send_num = 0;
+    int message_num = len / PAYLOAD_COUNT;
+    
+    if (len % PAYLOAD_COUNT != 0) {
+        printf("Error: len must be a multiple of PAYLOAD_COUNT (%ld)\n", PAYLOAD_COUNT);
+        return;
+    }
+
+    int my_rank = comm->group->rank;
+    bool is_root = (my_rank == root_rank);
+
+    struct ibv_recv_wr rr;
+    struct ibv_sge receive_sge;
+    struct ibv_recv_wr *receive_bad_wr;
+
+    // Root节点预先提交接收请求
+    if (is_root) {
+        for(int i = 0; i < message_num; i++) {
+            memset(&receive_sge, 0, sizeof(receive_sge));
+            receive_sge.addr = (uintptr_t)(comm->receive_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
+            receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+            receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+            memset(&rr, 0, sizeof(rr));
+            rr.next = NULL;
+            rr.wr_id = i;
+            rr.sg_list = &receive_sge;
+            rr.num_sge = 1;
+
+            int ret = ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+            printf("Reduce WRITE root rank %d: post recv ret %d\n", my_rank, ret);
+            fflush(stdout);
+        }
+    }
+
+    // 准备发送数据（包含元数据）
+    int32_t *send_buffer = (int32_t*)comm->send_payload;
+    
+    for(int i = 0; i < message_num; i++) {
+        int32_t *msg_buffer = send_buffer + i * PAYLOAD_COUNT;
+        
+        // 元数据：操作类型和root_rank
+        msg_buffer[0] = htonl(1);  // OPERATION_REDUCE
+        msg_buffer[1] = htonl(root_rank);
+        
+        // 实际数据
+        for(int j = 2; j < PAYLOAD_COUNT; j++) {
+            int src_idx = i * PAYLOAD_COUNT + (j - 2);
+            if(src_idx < len) {
+                msg_buffer[j] = htonl(src_data[src_idx]);
+            } else {
+                msg_buffer[j] = 0;
+            }
+        }
+    }
+
+    // 使用RDMA WRITE发送
+    for(int i = 0; i < comm->window_size/(MESSAGE_SIZE); i++) {
+        post_send(comm, send_buffer, i, IBV_WR_RDMA_WRITE);
+        send_num++;
+    }
+
+    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num);
+
+    if (is_root) {
+        // Root节点接收结果
+        while(receive_num != message_num) {
+            int result = ibv_poll_cq(comm->cq, message_num, wc);
+            if(result > 0) {
+                for(int i = 0; i < result; i++){
+                    struct ibv_wc *tmp = wc + i;
+
+                    if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_RECV) {
+                        printf("Reduce WRITE root receive success\n");
+                        fflush(stdout);
+                        uint64_t idx = tmp->wr_id;
+                        int *pack = (int *)(comm->receive_payload + idx * PAYLOAD_COUNT * sizeof(int32_t));
+
+                        for(int j = 2; j < PAYLOAD_COUNT; ++j){
+                            int dst_idx = idx * PAYLOAD_COUNT + (j - 2);
+                            if(dst_idx < len) {
+                                uint32_t net_val = pack[j];
+                                uint32_t host_val = ntohl(net_val);
+                                dst_data[dst_idx] = host_val;
+                            }
+                        }
+
+                        receive_num++;
+
+                        if(send_num < message_num) {
+                            post_send(comm, send_buffer, send_num, IBV_WR_RDMA_WRITE);
+                            send_num++;
+                        }
+                    } else if(tmp->status==IBV_WC_SUCCESS) {
+                        printf("Reduce WRITE root send success\n");
+                        fflush(stdout);
+                    } else {
+                        printf("Reduce WRITE root error: wc status: %d, opcode: %d\n", tmp->status, tmp->opcode);
+                        fflush(stdout);
+                        free(wc);
+                        return;
+                    }
+                }
+            } else if(result < 0) {
+                printf("Reduce WRITE root ibv_poll_cq error: %d\n", result);
+                fflush(stdout);
+                free(wc);
+                return;
+            }
+        }
+    } else {
+        // 非root节点等待发送完成
+        int send_complete = 0;
+        while(send_complete < send_num) {
+            int result = ibv_poll_cq(comm->cq, message_num, wc);
+            if(result > 0) {
+                for(int i = 0; i < result; i++){
+                    struct ibv_wc *tmp = wc + i;
+
+                    if(tmp->status==IBV_WC_SUCCESS && (tmp->opcode==IBV_WC_RDMA_WRITE)) {
+                        printf("Reduce WRITE non-root rank %d send success\n", my_rank);
+                        fflush(stdout);
+                        send_complete++;
+                        
+                        if(send_num < message_num) {
+                            post_send(comm, send_buffer, send_num, IBV_WR_RDMA_WRITE);
+                            send_num++;
+                        }
+                    } else if(tmp->status!=IBV_WC_SUCCESS) {
+                        printf("Reduce WRITE non-root rank %d error: wc status: %d, opcode: %d\n", 
+                               my_rank, tmp->status, tmp->opcode);
+                        fflush(stdout);
+                        free(wc);
+                        return;
+                    }
+                }
+            } else if(result < 0) {
+                printf("Reduce WRITE non-root rank %d ibv_poll_cq error: %d\n", my_rank, result);
+                fflush(stdout);
+                free(wc);
+                return;
+            }
+        }
+    }
+
+    free(wc);
+    printf("Reduce WRITE operation completed for rank %d\n", my_rank);
+    fflush(stdout);
 }

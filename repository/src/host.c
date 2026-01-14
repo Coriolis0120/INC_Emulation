@@ -33,11 +33,13 @@ void init_data_to_aggregate(int rank) {
     for(int i = 0; i < IN_DATA_COUNT; i++) {
         in_data[i] = i * (rank+1);
     }
+
 }
 
 
 int main(int argc, char *argv[]) {
     // 需要三个参数：world_size master_addr rank。
+    // 至于controller ip，是通过环境变量CONTROLLER_IP传入的。
     if(argc != 4) {
         printf("need 3 params now\n");
     }
@@ -57,18 +59,18 @@ int main(int argc, char *argv[]) {
     // 基于组创建通信器，并声明一次传输所需的字节数。
     struct inccl_communicator *comm = inccl_communicator_create(group, IN_DATA_COUNT * 4);
     printf("start...\n");
-
+    fflush(stdout);
     // 记录开始时间。
     start_time = clock();
 
-    inccl_allreduce_sendrecv(comm, in_data, IN_DATA_COUNT, dst_data);
+    inccl_allreduce_write(comm, in_data, IN_DATA_COUNT, dst_data);
     // 执行 allreduce 写操作，将 in_data 聚合到 dst_data。
     //inccl_allreduce_write(comm, in_data, IN_DATA_COUNT, dst_data);
 
     // 打印耗时。
     print_cost_time("over");
     
-    // 校验聚合结果；当前假设所有 rank 均为 0、1、2，总和等于 3*i。
+    // 校验聚合结果；当前假设所有 rank 均为 0、1，因为初始化的时候是(i+1)*rank，所以总和等于 3*i。
     for(int i = 0; i < IN_DATA_COUNT; i++) {
         if(i < 10)
             printf("idx: %d, in data: %d, reduce data: %d, expected: %d\n", i, in_data[i], dst_data[i], 3 * i);

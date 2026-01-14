@@ -303,13 +303,17 @@ static void send_roce_ack(int port, int psn){
 void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_t *packet) {
 
     // parser: extract header info
+    printf("[PIPELINE] Starting packet processing, ingress_port=%d\n", meta_p->ingress_port);
+    fflush(stdout);
 
     eth_header_t* eth = (eth_header_t*)packet;
     ipv4_header_t* ip = (ipv4_header_t*)(packet + sizeof(eth_header_t));
     udp_header_t* udp = (udp_header_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t));
     bth_header_t* bth = (bth_header_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t));
-    meta_p->psn = ntohl(bth->apsn) & 0x00FFFFFF; 
+    meta_p->psn = ntohl(bth->apsn) & 0x00FFFFFF;
     meta_p->opcode = bth->opcode;
+    printf("[PIPELINE] Extracted headers: PSN=%u, opcode=0x%02x\n", meta_p->psn, meta_p->opcode);
+    fflush(stdout);
     switch(bth->opcode){
         case 0x00:
         case 0x01:
@@ -319,79 +323,123 @@ void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_
         case 0x08: // write last
             if(meta_p->ingress_port < FAN_IN){
                 meta_p->type = UP_DATA;
+                printf("[PIPELINE] Classified as UP_DATA (port %d < FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
             }
             else{
                 meta_p->type = DOWN_DATA;
+                printf("[PIPELINE] Classified as DOWN_DATA (port %d >= FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
             }
             break;
         case 0x06:
         case 0x0A:
             if(meta_p->ingress_port < FAN_IN){
                 meta_p->type = UP_WRITE_FIRST_ONLY;
+                printf("[PIPELINE] Classified as UP_WRITE_FIRST_ONLY (port %d < FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
             }
             else{
                 meta_p->type = DOWN_WRITE_FIRST_ONLY;
+                printf("[PIPELINE] Classified as DOWN_WRITE_FIRST_ONLY (port %d >= FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
             }
             break;
         case 0x11:
             if(meta_p->ingress_port < FAN_IN){
                 meta_p->type = UP_ACK;
-            } 
+                printf("[PIPELINE] Classified as UP_ACK (port %d < FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
+            }
             else{
                 meta_p->type = DOWN_ACK;
+                printf("[PIPELINE] Classified as DOWN_ACK (port %d >= FAN_IN %d)\n", meta_p->ingress_port, FAN_IN);
+                fflush(stdout);
             }
             break;
     }
 
     // control: table match and action
     if(meta_p->type == UP_DATA){
+        printf("[PIPELINE] Processing UP_DATA packet, PSN=%u\n", meta_p->psn);
+        fflush(stdout);
         uint32_t* data = (uint32_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
         int data_len = (ntohs(udp->length) - sizeof(bth_header_t) - sizeof(udp_header_t) - 4); // icrc = 4
         assert(data_len == PAYLOAD_LEN);
         degree[Idx(meta_p->psn)]+=1;
+        printf("[PIPELINE] UP_DATA: incremented degree[%u] to %d\n", Idx(meta_p->psn), degree[Idx(meta_p->psn)]);
+        fflush(stdout);
         if(root){
+            printf("[PIPELINE] Root switch processing UP_DATA\n");
+            fflush(stdout);
             if(recv_from_port(meta_p->ingress_port, meta_p->psn)){
+                printf("[PIPELINE] Root: retransmission detected for port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 if(recv_from_port(FAN_IN, meta_p->psn)){ // has recieved from parent, just forward to the port
+                    printf("[PIPELINE] Root: forwarding aggregated data to port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                    fflush(stdout);
                     send_roce_data(meta_p->ingress_port, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
             }
             else{ // first transmission
+                printf("[PIPELINE] Root: first transmission from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 set_arrive_state(meta_p->ingress_port, meta_p->psn);
 
                 for(int i=0;i<data_len/sizeof(int);++i){
                     aggregator[Idx(meta_p->psn)][i] += ntohl(data[i]);
                 }
+                printf("[PIPELINE] Root: aggregated data from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
 
                 if(recv_from_all_fan_in(meta_p->psn)){
+                    printf("[PIPELINE] Root: received from all FAN_IN, broadcasting aggregated data, PSN=%u\n", meta_p->psn);
+                    fflush(stdout);
                     set_arrive_state(FAN_IN, meta_p->psn);
                     clear_state_data(meta_p->psn + WINDOW_SIZE);
                     // broadcast
                     for(int i=0;i<FAN_IN;++i){
                         send_roce_data(i, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                     }
+                    printf("[PIPELINE] Root: broadcast completed to all %d ports, PSN=%u\n", FAN_IN, meta_p->psn);
+                    fflush(stdout);
                 }
 
             }
         }
         else{
+            printf("[PIPELINE] Non-root switch processing UP_DATA\n");
+            fflush(stdout);
             if(recv_from_port(meta_p->ingress_port, meta_p->psn)){ // retransmission
+                printf("[PIPELINE] Non-root: retransmission detected for port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 if(recv_from_port(FAN_IN, meta_p->psn)){ // has recieved from parent, just forward to the port
+                    printf("[PIPELINE] Non-root: forwarding aggregated data to port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                    fflush(stdout);
                     send_roce_data(meta_p->ingress_port, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
                 else{   // under this condition, all child can't get the result packet, so all fan in will retransmit packets.
                     if(recv_from_all_fan_in(meta_p->psn) && degree[Idx(meta_p->psn)]%FAN_IN==0){
+                        printf("[PIPELINE] Non-root: retransmitting to parent, PSN=%u\n", meta_p->psn);
+                        fflush(stdout);
                         send_roce_data(FAN_IN, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                     }
                 }
             }
             else{ // first transmission
+                printf("[PIPELINE] Non-root: first transmission from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 set_arrive_state(meta_p->ingress_port, meta_p->psn);
 
                 for(int i=0;i<data_len/sizeof(int);++i){
                     aggregator[Idx(meta_p->psn)][i] += ntohl(data[i]);
                 }
+                printf("[PIPELINE] Non-root: aggregated data from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
 
                 if(recv_from_all_fan_in(meta_p->psn)){
+                    printf("[PIPELINE] Non-root: received from all FAN_IN, forwarding to parent, PSN=%u\n", meta_p->psn);
+                    fflush(stdout);
                     // forward to parent
                     send_roce_data(FAN_IN, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
@@ -401,79 +449,125 @@ void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_
 
     }
     else if(meta_p->type == UP_ACK){
+        printf("[PIPELINE] Processing UP_ACK packet, PSN=%u, port=%d\n", meta_p->psn, meta_p->ingress_port);
+        fflush(stdout);
         // ack reflection
         send_roce_ack(meta_p->ingress_port, meta_p->psn);
+        printf("[PIPELINE] UP_ACK: sent ACK reflection to port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+        fflush(stdout);
 
     }
     else if(meta_p->type == DOWN_DATA){
+        printf("[PIPELINE] Processing DOWN_DATA packet, PSN=%u\n", meta_p->psn);
+        fflush(stdout);
         uint32_t* data = (uint32_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
         int data_len = (ntohs(udp->length) - sizeof(bth_header_t) - sizeof(udp_header_t) - 4); // icrc = 4
         assert(data_len == PAYLOAD_LEN);
         if(!recv_from_port(FAN_IN, meta_p->psn) && recv_from_all_fan_in(meta_p->psn)){ // the second condition is very important! see 6.24 draft.
+            printf("[PIPELINE] DOWN_DATA: broadcasting to all %d ports, PSN=%u\n", FAN_IN, meta_p->psn);
+            fflush(stdout);
             memcpy(aggregator[Idx(meta_p->psn)], data, PAYLOAD_LEN);
             set_arrive_state(FAN_IN,meta_p->psn);
             // broadcast()
             for(int i=0;i<FAN_IN;++i){
                 send_roce_data(i, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
             }
+            printf("[PIPELINE] DOWN_DATA: broadcast completed, PSN=%u\n", meta_p->psn);
+            fflush(stdout);
         }
         else {
+            printf("[PIPELINE] DOWN_DATA: ignoring packet (already received from parent or not ready), PSN=%u\n", meta_p->psn);
+            fflush(stdout);
             return; // just ignore, very rare
         }
     }
     else if(meta_p->type == DOWN_ACK){
+        printf("[PIPELINE] DOWN_ACK packet received (should not happen), PSN=%u\n", meta_p->psn);
+        fflush(stdout);
         // impossible
     }
     else if(meta_p->type == UP_WRITE_FIRST_ONLY){
+        printf("[PIPELINE] Processing UP_WRITE_FIRST_ONLY packet, PSN=%u\n", meta_p->psn);
+        fflush(stdout);
         uint32_t *data = (uint32_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t) + sizeof(reth_header_t));
         int data_len = (ntohs(udp->length) - sizeof(reth_header_t) - sizeof(bth_header_t) - sizeof(udp_header_t) - 4); // icrc = 4
         assert(data_len == PAYLOAD_LEN);
         degree[Idx(meta_p->psn)]+=1;
+        printf("[PIPELINE] UP_WRITE_FIRST_ONLY: incremented degree[%u] to %d\n", Idx(meta_p->psn), degree[Idx(meta_p->psn)]);
+        fflush(stdout);
         char *reth = (char *)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
 
         if(root){
+            printf("[PIPELINE] Root switch processing UP_WRITE_FIRST_ONLY\n");
+            fflush(stdout);
             if(recv_from_port(meta_p->ingress_port, meta_p->psn)){
+                printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: retransmission detected for port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 if(recv_from_port(FAN_IN, meta_p->psn)){ // has recieved from parent (as for root, it means aggregation completed), just forward to the port
+                    printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: forwarding to port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                    fflush(stdout);
                     send_roce_data_with_reth(meta_p->ingress_port, (uint8_t *)(&(reth_keeper[Idx(meta_p->psn)][meta_p->ingress_port])), (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
             }
             else{ // first transmission
+                printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: first transmission from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 set_arrive_state(meta_p->ingress_port, meta_p->psn);
                 memcpy(&(reth_keeper[Idx(meta_p->psn)][meta_p->ingress_port]), reth, sizeof(reth_header_t));
                 for(int i=0;i<data_len/sizeof(int);++i){
                     aggregator[Idx(meta_p->psn)][i] += ntohl(data[i]);
                 }
+                printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: aggregated data from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
 
                 if(recv_from_all_fan_in(meta_p->psn)){
+                    printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: received from all FAN_IN, broadcasting, PSN=%u\n", meta_p->psn);
+                    fflush(stdout);
                     set_arrive_state(FAN_IN, meta_p->psn);
                     clear_state_data(meta_p->psn + WINDOW_SIZE);
                     // broadcast
                     for(int i=0;i<FAN_IN;++i){
                         send_roce_data_with_reth(i, (uint8_t *)(&(reth_keeper[Idx(meta_p->psn)][i])), (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                     }
+                    printf("[PIPELINE] Root UP_WRITE_FIRST_ONLY: broadcast completed to all %d ports, PSN=%u\n", FAN_IN, meta_p->psn);
+                    fflush(stdout);
                 }
             }
         }
         else{
+            printf("[PIPELINE] Non-root switch processing UP_WRITE_FIRST_ONLY\n");
+            fflush(stdout);
             if(recv_from_port(meta_p->ingress_port, meta_p->psn)){ // retransmission
+                printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: retransmission detected for port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 if(recv_from_port(FAN_IN, meta_p->psn)){ // has recieved from parent, just forward to the port
+                    printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: forwarding to port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                    fflush(stdout);
                     send_roce_data_with_reth(meta_p->ingress_port, (uint8_t *)(&(reth_keeper[Idx(meta_p->psn)][meta_p->ingress_port])), (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
                 else{   // under this condition, all child can't get the result packet, so all fan in will retransmit packets.
                     if(recv_from_all_fan_in(meta_p->psn) && degree[Idx(meta_p->psn)]%FAN_IN==0){
+                        printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: retransmitting to parent, PSN=%u\n", meta_p->psn);
+                        fflush(stdout);
                         send_roce_data_with_reth(FAN_IN, NULL, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                     }
                 }
             }
             else{ // first transmission
+                printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: first transmission from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
                 set_arrive_state(meta_p->ingress_port, meta_p->psn);
                 memcpy(&(reth_keeper[Idx(meta_p->psn)][meta_p->ingress_port]), reth, sizeof(reth_header_t));
 
                 for(int i=0;i<data_len/sizeof(int);++i){
                     aggregator[Idx(meta_p->psn)][i] += ntohl(data[i]);
                 }
+                printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: aggregated data from port %d, PSN=%u\n", meta_p->ingress_port, meta_p->psn);
+                fflush(stdout);
 
                 if(recv_from_all_fan_in(meta_p->psn)){
+                    printf("[PIPELINE] Non-root UP_WRITE_FIRST_ONLY: received from all FAN_IN, forwarding to parent, PSN=%u\n", meta_p->psn);
+                    fflush(stdout);
                     // forward to parent
                     send_roce_data_with_reth(FAN_IN, NULL, (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
                 }
@@ -482,22 +576,32 @@ void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_
         }
     }
     else if(meta_p->type == DOWN_WRITE_FIRST_ONLY){
+        printf("[PIPELINE] Processing DOWN_WRITE_FIRST_ONLY packet, PSN=%u\n", meta_p->psn);
+        fflush(stdout);
          uint32_t *data = (uint32_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t) + sizeof(reth_header_t));
         int data_len = (ntohs(udp->length) - sizeof(reth_header_t) - sizeof(bth_header_t) - sizeof(udp_header_t) - 4); // icrc = 4
         assert(data_len == PAYLOAD_LEN);
         if(!recv_from_port(FAN_IN, meta_p->psn) && recv_from_all_fan_in(meta_p->psn)){ // the second condition is very important! see 6.24 draft.
+            printf("[PIPELINE] DOWN_WRITE_FIRST_ONLY: broadcasting to all %d ports, PSN=%u\n", FAN_IN, meta_p->psn);
+            fflush(stdout);
             memcpy(aggregator[Idx(meta_p->psn)], data, PAYLOAD_LEN);
             set_arrive_state(FAN_IN,meta_p->psn);
             // broadcast()
             for(int i=0;i<FAN_IN;++i){
                 send_roce_data_with_reth(i, (uint8_t *)(&(reth_keeper[Idx(meta_p->psn)][i])), (uint8_t *)aggregator[Idx(meta_p->psn)], meta_p->psn, PAYLOAD_LEN, meta_p->opcode);
             }
+            printf("[PIPELINE] DOWN_WRITE_FIRST_ONLY: broadcast completed, PSN=%u\n", meta_p->psn);
+            fflush(stdout);
         }
         else {
+            printf("[PIPELINE] DOWN_WRITE_FIRST_ONLY: ignoring packet (already received from parent or not ready), PSN=%u\n", meta_p->psn);
+            fflush(stdout);
             return; // just ignore, very rare
         }
     }
 
+    printf("[PIPELINE] Completed packet processing, PSN=%u\n", meta_p->psn);
+    fflush(stdout);
 }
 
 
@@ -523,6 +627,7 @@ void epoll_process_packets(){
             
             while ((pcap_next_ex(conns[meta.ingress_port].handle, &pkthdr, &packet)) == 1) {
                 printf("recv packet from port %d\n",meta.ingress_port);
+                fflush(stdout);
                 pipeline(&meta, pkthdr, packet);
             }
         }
@@ -530,15 +635,13 @@ void epoll_process_packets(){
 }
 
 int main(int argc, char *argv[]) {
-    char *controller_ip;
-    if(argc != 2) {
-        return -1;
-    } else {
-        controller_ip = argv[1];
-    }
+
+    char * controller_ip = "192.168.0.3";
+    
+    
     
 
-    if (log_init("/home/ubuntu/switch.log") != 0) {
+    if (log_init(NULL) != 0) {
         fprintf(stderr, "Failed to open log file\n");
         return 1;
     }

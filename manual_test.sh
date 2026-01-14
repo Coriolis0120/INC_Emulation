@@ -10,7 +10,7 @@ sleep 2
 
 echo ""
 echo "=== Step 2: Starting Switch ==="
-ssh switch "cd /root && ./switch  > /root/switch.log" &
+ssh switch "cd /root && ./non_termination_switch  > /root/switch.log" &
 sleep 2
 
 echo ""

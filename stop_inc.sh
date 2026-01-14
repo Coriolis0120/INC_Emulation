@@ -12,6 +12,7 @@ ssh vm2 "pkill -f './host'"
 
 echo "[3/4] Stopping switch..."
 ssh switch "pkill -f './switch'"
+ssh switch "pkill -f './non_termination_switch'"
 
 echo "[4/4] Stopping controller..."
 ssh controller "pkill -f './controller'"

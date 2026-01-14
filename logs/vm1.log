@@ -2,14 +2,38 @@
 world_size: 2, master_addr: 192.168.0.6, rank: 0
 devices num 1
 rxe_eth1
-my ip: 83890348
+
+===== Device Attributes =====
+Maximum QPs: 65536
+Maximum CQs: 16384
+Maximum MRs: 4096
+Maximum PDs: 32764
+Maximum QP WR: 16384
+Maximum CQ entries: 32767
+Maximum MR size: 18446744073709551615 bytes
+=============================
+
+
+===== Port Attributes =====
+Port state: 4 (0=DOWN, 1=INIT, 2=ARMED, 3=ACTIVE)
+Physical state: 5
+LID: 0x0000 (0)
+Active MTU: 3 (256*2^3 = 2048 bytes)
+Max MTU: 5 (256*2^5 = 8192 bytes)
+Active speed: 1
+Active width: 1 (1=1x, 2=4x, 4=8x, 8=12x)
+GID table length: 1024
+Link layer: 2 (0=IB, 1=Ethernet)
+============================
+
+my ip: 172.16.0.5
 controller ip: 192.168.0.3 
 connect to ranks success.
 connect to controller success.
 group id: 1!
 my QP number = 18
 rank0 qp num 18
-rank1 qp num 43
+rank1 qp num 64
 File received and saved to: /root/NetLab/topology.yaml
 send file to fd: 6 succeed.
 parse yaml
@@ -21,31 +45,23 @@ ret of rtr 0
 qp status: 2
 ret of rts 0
 start...
-i: 0, post recv ret 0
-i: 1, post recv ret 0
-i: 2, post recv ret 0
-i: 3, post recv ret 0
-send success
-send success
+allreduce write...
+post send idx 0
+post send idx 1
+initial send done, send_num 2
+tmp->status 0
+tmp->opcode 1
 receive success
-recv[0][0]: net=0x00000000, host=0, stored=0
-recv[0][1]: net=0x03000000, host=3, stored=3
-recv[0][2]: net=0x06000000, host=6, stored=6
-send success
+tmp->status 0
+tmp->opcode 1
 receive success
-recv[1][0]: net=0x000c0000, host=3072, stored=3072
-recv[1][1]: net=0x030c0000, host=3075, stored=3075
-recv[1][2]: net=0x060c0000, host=3078, stored=3078
-send success
+tmp->status 0
+tmp->opcode 1
 receive success
-recv[2][0]: net=0x00180000, host=6144, stored=6144
-recv[2][1]: net=0x03180000, host=6147, stored=6147
-recv[2][2]: net=0x06180000, host=6150, stored=6150
+tmp->status 0
+tmp->opcode 1
 receive success
-recv[3][0]: net=0x00240000, host=9216, stored=9216
-recv[3][1]: net=0x03240000, host=9219, stored=9219
-recv[3][2]: net=0x06240000, host=9222, stored=9222
-over, Time taken: 2.138000 mileseconds
+over, Time taken: 2.183000 mileseconds
 idx: 0, in data: 0, reduce data: 0, expected: 0
 idx: 1, in data: 1, reduce data: 3, expected: 3
 idx: 2, in data: 2, reduce data: 6, expected: 6
@@ -56,4 +72,5 @@ idx: 6, in data: 6, reduce data: 18, expected: 18
 idx: 7, in data: 7, reduce data: 21, expected: 21
 idx: 8, in data: 8, reduce data: 24, expected: 24
 idx: 9, in data: 9, reduce data: 27, expected: 27
+ERROR at idx 256: got 196608, expected 768
 result ok
