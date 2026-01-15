@@ -163,6 +163,10 @@ int root; // 标识是否为根交换机（1-是，0-否）
 // rank_to_conn[rank] = connection_id，用于Reduce操作时找到目标rank的连接
 int rank_to_conn[FAN_IN];  // 最多支持FAN_IN个子节点
 
+// 当前操作的全局元数据（从PSN=0提取，供后续PSN使用）
+int current_operation_type = 0;  // 0=AllReduce, 1=Reduce
+int current_root_rank = 0;       // Reduce操作的根节点
+
 // 路由表：根据源IP和目标IP查找对应的转发规则
 rule_table_t table;
 
@@ -676,19 +680,63 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
     int id = rule->id;
     LOG_FUNC_ENTRY(id);
 
+    printf("[SWITCH] aggregate: PSN=%u, op_type=%d, root_rank=%d, len=%d\n",
+           psn, operation_type, root_rank, len);
+    fflush(stdout);
+
     // 保护聚合操作（多线程环境）
     pthread_mutex_lock(&agg_mutex);
 
-    // 将当前数据聚合到缓冲区（网络字节序转换为主机字节序进行加法）
-    add_payload(agg_buffer[Idx(psn)].buffer, data, len);
+    // 第一次聚合时，初始化
+    if(agg_degree[Idx(psn)] == 0) {
+        if(psn == 0) {
+            // PSN=0的消息包含元数据
+            agg_buffer[Idx(psn)].buffer[0] = data[0];  // operation_type
+            agg_buffer[Idx(psn)].buffer[1] = data[1];  // root_rank
+            agg_buffer[Idx(psn)].operation_type = operation_type;
+            agg_buffer[Idx(psn)].root_rank = root_rank;
+
+            // 聚合实际数据（从第3个元素开始）
+            for(int i = 2; i < len; i++) {
+                agg_buffer[Idx(psn)].buffer[i] = data[i];
+            }
+        } else {
+            // PSN>0的消息全是数据，没有元数据
+            // 从PSN=0获取operation_type和root_rank
+            agg_buffer[Idx(psn)].operation_type = agg_buffer[Idx(0)].operation_type;
+            agg_buffer[Idx(psn)].root_rank = agg_buffer[Idx(0)].root_rank;
+
+            // 全部聚合
+            for(int i = 0; i < len; i++) {
+                agg_buffer[Idx(psn)].buffer[i] = data[i];
+            }
+        }
+    } else {
+        // 后续聚合
+        if(psn == 0) {
+            // PSN=0：跳过元数据，只聚合实际数据
+            for(int i = 2; i < len; i++) {
+                uint32_t dst_host = ntohl(agg_buffer[Idx(psn)].buffer[i]);
+                uint32_t src_host = ntohl(data[i]);
+                uint32_t result = dst_host + src_host;
+                agg_buffer[Idx(psn)].buffer[i] = htonl(result);
+            }
+        } else {
+            // PSN>0：全部聚合
+            for(int i = 0; i < len; i++) {
+                uint32_t dst_host = ntohl(agg_buffer[Idx(psn)].buffer[i]);
+                uint32_t src_host = ntohl(data[i]);
+                uint32_t result = dst_host + src_host;
+                agg_buffer[Idx(psn)].buffer[i] = htonl(result);
+            }
+        }
+    }
 
     // 更新缓冲区元数据
     agg_buffer[Idx(psn)].len = len;
     agg_buffer[Idx(psn)].packet_type = packet_type;
     agg_buffer[Idx(psn)].state = 1;  // 标记为已使用
     agg_buffer[Idx(psn)].psn = psn;
-    agg_buffer[Idx(psn)].operation_type = operation_type;  // 记录操作类型
-    agg_buffer[Idx(psn)].root_rank = root_rank;  // 记录根节点rank
 
     // 增加聚合度计数器
     agg_degree[Idx(psn)]++;
@@ -696,6 +744,10 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
 
     // 检查是否所有上行数据都已经到达
     if(agg_degree[Idx(psn)] == FAN_IN) {
+        printf("[SWITCH] Aggregation complete for PSN=%u, degree=%d/%d\n",
+               psn, agg_degree[Idx(psn)], FAN_IN);
+        fflush(stdout);
+
         // 聚合完成，触发下一步操作
         if(root == 1) {
             // 根交换机：根据操作类型决定下一步
@@ -715,11 +767,16 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
                     down_ack_handler(&aeth, NULL, psn);
                 } else if(operation_type == OPERATION_REDUCE) {
                     // Reduce操作：仅发送到指定的根rank节点
+                    printf("[SWITCH] REDUCE operation: sending to root_rank=%d, PSN=%u\n", root_rank, psn);
+                    fflush(stdout);
                     log_write(id, "Reduce: sending to root rank %d, psn: %d\n", root_rank, psn);
 
                     // 查找根rank对应的连接ID
                     int target_conn_id = -1;
                     for(int i = 0; i < FAN_IN; i++) {
+                        printf("[SWITCH] Checking rank_to_conn[%d]=%d vs root_rank=%d\n",
+                               i, rank_to_conn[i], root_rank);
+                        fflush(stdout);
                         if(rank_to_conn[i] == root_rank) {
                             target_conn_id = i;
                             break;
@@ -728,6 +785,9 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
 
                     if(target_conn_id >= 0) {
                         // 找到目标连接，发送聚合结果
+                        printf("[SWITCH] Found target connection: conn_id=%d\n", target_conn_id);
+                        fflush(stdout);
+
                         connection_t* target_conn = &conns[target_conn_id];
 
                         uint8_t packet[5555];
@@ -739,12 +799,21 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
                             target_conn->peer_qp, psn, psn + 1, packet_type, NULL
                         );
 
+                        printf("[SWITCH] Sending Reduce result: size=%d bytes\n", size);
+                        fflush(stdout);
+
                         if (pcap_sendpacket(target_conn->handle, (uint8_t *)packet, size) == -1) {
                             fprintf(stderr, "Error sending Reduce result: %s\n", pcap_geterr(target_conn->handle));
+                            fflush(stderr);
+                        } else {
+                            printf("[SWITCH] Reduce result sent successfully to rank %d\n", root_rank);
+                            fflush(stdout);
                         }
 
                         log_write(id, "Reduce result sent to rank %d via conn %d\n", root_rank, target_conn_id);
                     } else {
+                        printf("[SWITCH] ERROR: Cannot find connection for root rank %d\n", root_rank);
+                        fflush(stdout);
                         log_write(id, "ERROR: Cannot find connection for root rank %d\n", root_rank);
                     }
 
@@ -826,6 +895,11 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
 
     // 提取包序号（PSN），用于流控和重传
     int psn = ntohl(bth->apsn) & 0x00FFFFFF;  // 取BTH头部中的24位PSN
+
+    // 添加printf调试输出
+    printf("[SWITCH] Thread %d: Received packet, PSN=%u, opcode=0x%02x\n", id, psn, bth->opcode);
+    fflush(stdout);
+
     log_write(id, "psn: %u\n", psn);
 
     // 处理数据包（RDMA SEND操作）
@@ -892,20 +966,30 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
                     forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0);
 
                     // 从数据包中提取操作类型和根rank信息
-                    // 假设数据包的前两个uint32_t存储元数据：
-                    // data[0] = operation_type (OPERATION_ALLREDUCE 或 OPERATION_REDUCE)
-                    // data[1] = root_rank (仅用于Reduce操作)
-                    int operation_type = OPERATION_ALLREDUCE;  // 默认为AllReduce
-                    int root_rank = 0;  // 默认根节点为rank 0
+                    // 只有PSN=0的消息包含元数据，PSN>0使用全局变量
+                    int operation_type = OPERATION_ALLREDUCE;
+                    int root_rank = 0;
 
-                    if(data_len >= 2) {
-                        // 提取操作类型（网络字节序转主机字节序）
+                    if(psn == 0 && data_len >= 2) {
+                        // PSN=0: 提取元数据并存储到全局变量
                         operation_type = ntohl(data[0]);
                         root_rank = ntohl(data[1]);
 
-                        // 跳过元数据，只聚合实际数据
-                        // 注意：这里简化处理，实际应该在协议层面明确定义
-                        log_write(id, "Operation type: %d, Root rank: %d\n", operation_type, root_rank);
+                        // 存储到全局变量，供后续PSN使用
+                        current_operation_type = operation_type;
+                        current_root_rank = root_rank;
+
+                        printf("[SWITCH] Thread %d: PSN=0 metadata - op_type=%d, root_rank=%d\n",
+                               id, operation_type, root_rank);
+                        fflush(stdout);
+                    } else if(psn > 0) {
+                        // PSN>0: 使用全局变量中存储的元数据
+                        operation_type = current_operation_type;
+                        root_rank = current_root_rank;
+
+                        printf("[SWITCH] Thread %d: PSN=%u using global metadata - op_type=%d, root_rank=%d\n",
+                               id, psn, operation_type, root_rank);
+                        fflush(stdout);
                     }
 
                     // 聚合模块

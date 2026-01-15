@@ -2,7 +2,7 @@
 waiting for switch 0 to connect...
 connect with switches success.
 waiting for rank0 to connect...
-New connection from: 192.168.0.6:45672
+New connection from: 192.168.0.6:56188
 waiting for rank0 to connect...
 begin to recv from rank0.
 recv the group creation request.
@@ -11,7 +11,7 @@ recv the ip 10.10.0.7.
 begin to recv from rank0.
 recv the communicator creation request.
 recv the qp num 18.
-recv the qp num 64.
+recv the qp num 81.
 all qp nums received.
 in function calculate_route
 0
@@ -31,7 +31,7 @@ send file to fd: 6 succeed.
 begin to recv from rank0.
 recv the communicator creation request.
 recv the qp num 2.
-recv the qp num 32764.
+recv the qp num 32538.
 all qp nums received.
 in function calculate_route
 0
@@ -51,7 +51,7 @@ send file to fd: 6 succeed.
 begin to recv from rank0.
 recv the communicator creation request.
 recv the qp num 2.
-recv the qp num 32764.
+recv the qp num 32538.
 all qp nums received.
 in function calculate_route
 0

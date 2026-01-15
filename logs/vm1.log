@@ -1,5 +1,14 @@
 ---- VM1 Log ----
-world_size: 2, master_addr: 192.168.0.6, rank: 0
+=== Reduce Test Configuration ===
+world_size: 2
+master_addr: 192.168.0.6
+rank: 0
+root_rank: 0
+data_count: 4096
+==================================
+
+Rank 0: Initialized input data (first 5 elements): 0 1 2 3 4 
+Rank 0: Creating communication group...
 devices num 1
 rxe_eth1
 
@@ -31,9 +40,10 @@ controller ip: 192.168.0.3
 connect to ranks success.
 connect to controller success.
 group id: 1!
+Rank 0: Creating communicator...
 my QP number = 18
 rank0 qp num 18
-rank1 qp num 64
+rank1 qp num 81
 File received and saved to: /root/NetLab/topology.yaml
 send file to fd: 6 succeed.
 parse yaml
@@ -44,33 +54,54 @@ mtu: 3
 ret of rtr 0
 qp status: 2
 ret of rts 0
-start...
-allreduce write...
-post send idx 0
-post send idx 1
-initial send done, send_num 2
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-over, Time taken: 2.183000 mileseconds
-idx: 0, in data: 0, reduce data: 0, expected: 0
-idx: 1, in data: 1, reduce data: 3, expected: 3
-idx: 2, in data: 2, reduce data: 6, expected: 6
-idx: 3, in data: 3, reduce data: 9, expected: 9
-idx: 4, in data: 4, reduce data: 12, expected: 12
-idx: 5, in data: 5, reduce data: 15, expected: 15
-idx: 6, in data: 6, reduce data: 18, expected: 18
-idx: 7, in data: 7, reduce data: 21, expected: 21
-idx: 8, in data: 8, reduce data: 24, expected: 24
-idx: 9, in data: 9, reduce data: 27, expected: 27
-ERROR at idx 256: got 196608, expected 768
-result ok
+Rank 0: Starting Reduce operation...
+Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=5
+Reduce root rank 0: post recv ret 0
+Reduce root rank 0: post recv ret 0
+Reduce root rank 0: post recv ret 0
+Reduce root rank 0: post recv ret 0
+Reduce root rank 0: post recv ret 0
+Rank 0: Prepared msg 0 with metadata: op=1 root=0, data[0..1021]
+Rank 0: Prepared msg 1, data[1022..2045]
+Reduce root send success
+Reduce root send success
+Reduce root receive success
+Reduce root: received msg 0 (with metadata), data[0..1021]
+Reduce root receive success
+Reduce root: received msg 1, data[1022..2045]
+Reduce root send success
+Reduce root send success
+Reduce root receive success
+Reduce root receive success
+Reduce root send success
+Reduce root receive success
+Reduce operation completed for rank 0
+Reduce operation completed, Time taken: 2.024000 milliseconds
+
+=== Root Rank 0: Verifying Reduce Result ===
+Expected multiplier: 3 (sum of 1..2)
+
+First 10 elements:
+  idx 0: in_data=0, dst_data=0, expected=0 ✓
+  idx 1: in_data=1, dst_data=3, expected=3 ✓
+  idx 2: in_data=2, dst_data=6, expected=6 ✓
+  idx 3: in_data=3, dst_data=9, expected=9 ✓
+  idx 4: in_data=4, dst_data=12, expected=12 ✓
+  idx 5: in_data=5, dst_data=15, expected=15 ✓
+  idx 6: in_data=6, dst_data=18, expected=18 ✓
+  idx 7: in_data=7, dst_data=21, expected=21 ✓
+  idx 8: in_data=8, dst_data=24, expected=24 ✓
+  idx 9: in_data=9, dst_data=27, expected=27 ✓
+
+SUCCESS: All 4096 elements verified correctly!
+Root rank 0 received correct aggregated result.
+
+=== Test Summary ===
+Operation: Reduce
+World size: 2
+Root rank: 0
+Current rank: 0
+Data count: 4096 elements
+====================
+
+Rank 0: Test completed.

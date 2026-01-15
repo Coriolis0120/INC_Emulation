@@ -1,5 +1,14 @@
 ---- VM2 Log ----
-world_size: 2, master_addr: 192.168.0.6, rank: 1
+=== Reduce Test Configuration ===
+world_size: 2
+master_addr: 192.168.0.6
+rank: 1
+root_rank: 0
+data_count: 4096
+==================================
+
+Rank 1: Initialized input data (first 5 elements): 0 2 4 6 8 
+Rank 1: Creating communication group...
 devices num 1
 rxe_eth1
 
@@ -28,7 +37,8 @@ Link layer: 2 (0=IB, 1=Ethernet)
 
 my ip: 10.10.0.7
 connect to master success.
-my QP number = 64
+Rank 1: Creating communicator...
+my QP number = 81
 File received and saved to: /root/NetLab/topology.yaml
 parse yaml
 Remote QP number = 0xc
@@ -38,33 +48,29 @@ mtu: 3
 ret of rtr 0
 qp status: 2
 ret of rts 0
-start...
-allreduce write...
-post send idx 0
-post send idx 1
-initial send done, send_num 2
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-tmp->status 0
-tmp->opcode 1
-receive success
-over, Time taken: 1.719000 mileseconds
-idx: 0, in data: 0, reduce data: 0, expected: 0
-idx: 1, in data: 2, reduce data: 3, expected: 3
-idx: 2, in data: 4, reduce data: 6, expected: 6
-idx: 3, in data: 6, reduce data: 9, expected: 9
-idx: 4, in data: 8, reduce data: 12, expected: 12
-idx: 5, in data: 10, reduce data: 15, expected: 15
-idx: 6, in data: 12, reduce data: 18, expected: 18
-idx: 7, in data: 14, reduce data: 21, expected: 21
-idx: 8, in data: 16, reduce data: 24, expected: 24
-idx: 9, in data: 18, reduce data: 27, expected: 27
-ERROR at idx 256: got 196608, expected 768
-result ok
+Rank 1: Starting Reduce operation...
+Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=5
+Rank 1: Prepared msg 0 with metadata: op=1 root=0, data[0..1021]
+Rank 1: Prepared msg 1, data[1022..2045]
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce operation completed for rank 1
+Reduce operation completed, Time taken: 1.562000 milliseconds
+
+=== Non-Root Rank 1: Checking Result ===
+This rank should NOT receive aggregated data.
+Correct: dst_data remains unmodified (first 10 elements are 0).
+Rank 1 completed Reduce operation successfully.
+
+=== Test Summary ===
+Operation: Reduce
+World size: 2
+Root rank: 0
+Current rank: 1
+Data count: 4096 elements
+====================
+
+Rank 1: Test completed.
