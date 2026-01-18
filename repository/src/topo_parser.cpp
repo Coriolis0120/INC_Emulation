@@ -30,12 +30,14 @@ int parse_config(const char* yaml_file, int max_count, int* root, int switch_id,
     YAML::Node config = YAML::LoadFile(yaml_file);
     int index = 0;
     for (const auto& sw : config["switches"]) {
-        if (sw["id"].as<int>() == switch_id) {
+        if (sw["id"].as<int>() == switch_id) { // 找到自己的交换机
             *root = sw["root"].as<bool>();
 
             for (const auto& conn : sw["connections"]) {
-                if (index >= max_count) 
-                    return index;
+                if (index >= max_count) {
+                    fprintf(stderr, "Exceeded maximum connection count\n");
+                    return -1;
+                }
     
                 auto store_string = [](const std::string& str) -> const char* {
                     strings.push_back(str);

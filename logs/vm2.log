@@ -1,11 +1,10 @@
 ---- VM2 Log ----
-=== Reduce Test Configuration ===
+=== AllReduce Test Configuration ===
 world_size: 2
 master_addr: 192.168.0.6
 rank: 1
-root_rank: 0
 data_count: 4096
-==================================
+====================================
 
 Rank 1: Initialized input data (first 5 elements): 0 2 4 6 8 
 Rank 1: Creating communication group...
@@ -38,7 +37,7 @@ Link layer: 2 (0=IB, 1=Ethernet)
 my ip: 10.10.0.7
 connect to master success.
 Rank 1: Creating communicator...
-my QP number = 81
+my QP number = 107
 File received and saved to: /root/NetLab/topology.yaml
 parse yaml
 Remote QP number = 0xc
@@ -48,27 +47,56 @@ mtu: 3
 ret of rtr 0
 qp status: 2
 ret of rts 0
-Rank 1: Starting Reduce operation...
-Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=5
-Rank 1: Prepared msg 0 with metadata: op=1 root=0, data[0..1021]
-Rank 1: Prepared msg 1, data[1022..2045]
-Reduce non-root rank 1 send success
-Reduce non-root rank 1 send success
-Reduce non-root rank 1 send success
-Reduce non-root rank 1 send success
-Reduce non-root rank 1 send success
-Reduce operation completed for rank 1
-Reduce operation completed, Time taken: 1.562000 milliseconds
+Rank 1: Starting AllReduce operation...
+i: 0, post recv ret 0
+i: 1, post recv ret 0
+i: 2, post recv ret 0
+i: 3, post recv ret 0
+send success
+receive success
+recv[0][0]: net=0x00000000, host=0, stored=0
+recv[0][1]: net=0x01000000, host=1, stored=1
+recv[0][2]: net=0x06000000, host=6, stored=6
+send success
+receive success
+recv[1][0]: net=0x000c0000, host=3072, stored=3072
+recv[1][1]: net=0x030c0000, host=3075, stored=3075
+recv[1][2]: net=0x060c0000, host=3078, stored=3078
+send success
+receive success
+recv[2][0]: net=0x00180000, host=6144, stored=6144
+recv[2][1]: net=0x03180000, host=6147, stored=6147
+recv[2][2]: net=0x06180000, host=6150, stored=6150
+send success
+receive success
+recv[3][0]: net=0x00240000, host=9216, stored=9216
+recv[3][1]: net=0x03240000, host=9219, stored=9219
+recv[3][2]: net=0x06240000, host=9222, stored=9222
+AllReduce operation completed, Time taken: 15.043000 milliseconds
 
-=== Non-Root Rank 1: Checking Result ===
-This rank should NOT receive aggregated data.
-Correct: dst_data remains unmodified (first 10 elements are 0).
-Rank 1 completed Reduce operation successfully.
+=== Rank 1: Verifying AllReduce Result ===
+Expected multiplier: 3 (sum of 1..2)
+
+First 10 elements:
+  idx 0: in_data=0, dst_data=0, expected=0 ✓
+  idx 1: in_data=2, dst_data=1, expected=3 ✗
+
+ERROR: Mismatch detected!
+  ERROR at idx 1: got 1, expected 3
+  idx 2: in_data=4, dst_data=6, expected=6 ✓
+  idx 3: in_data=6, dst_data=9, expected=9 ✓
+  idx 4: in_data=8, dst_data=12, expected=12 ✓
+  idx 5: in_data=10, dst_data=15, expected=15 ✓
+  idx 6: in_data=12, dst_data=18, expected=18 ✓
+  idx 7: in_data=14, dst_data=21, expected=21 ✓
+  idx 8: in_data=16, dst_data=24, expected=24 ✓
+  idx 9: in_data=18, dst_data=27, expected=27 ✓
+
+FAILED: Result verification failed!
 
 === Test Summary ===
-Operation: Reduce
+Operation: AllReduce
 World size: 2
-Root rank: 0
 Current rank: 1
 Data count: 4096 elements
 ====================

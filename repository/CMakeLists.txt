@@ -30,12 +30,14 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(OPT_FLAGS -O3 -march=native -funroll-loops)
 endif()
 
-# termination_switch
+# termination_switch 
 add_executable(switch src/switch.c third_party/C-Thread-Pool/thpool.c ${COMMON_SRCS} ${CONFIG_PARSER})
 target_link_libraries(switch ibverbs pthread pcap ${YAML_CPP_STATIC} )
 if(OPT_FLAGS)
     target_compile_options(switch PRIVATE ${OPT_FLAGS})
 endif()
+
+
 
 # non_termination_switch
 add_executable(non_termination_switch src/non_termination_switch.c third_party/C-Thread-Pool/thpool.c ${COMMON_SRCS} ${CONFIG_PARSER})

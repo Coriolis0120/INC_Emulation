@@ -24,7 +24,7 @@ ssh vm2 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host 2 192.168.0.6 
 
 echo ""
 echo "=== Waiting for completion (30 seconds) ==="
-sleep 5
+sleep 10
 
 echo ""
 echo "=== Cleaning up ==="

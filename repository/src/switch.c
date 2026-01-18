@@ -68,12 +68,22 @@
 
 // =========================== 配置信息(yaml or 控制器, 暂时硬编码) =======================
 #define N 300  // 交换机上各个数组的长度（循环缓冲区大小）
+// 并发窗口的大小是 N
+// 这里目前还仅支持同一个通信组
+
 #define FAN_IN 2  // 交换机子节点个数（扇入系数）
+// [IMPROVE] 关于FAN_IN，我觉得不应该是定死的，应该交给Controller动态配置
+
+#define MAX_CONNECTIONS 10 // 最大连接数
+
 #define Idx(psn) ((psn) % N)  // 根据PSN计算循环缓冲区索引
 
 // 集合通信操作类型定义
-#define OPERATION_ALLREDUCE 0  // AllReduce操作：所有节点接收结果
-#define OPERATION_REDUCE 1     // Reduce操作：仅根节点接收结果
+typedef enum {
+    OPERATION_TYPE_ALLREDUCE = 0,
+    OPERATION_TYPE_REDUCE = 1
+} primitive_type_t;
+
 // =====================================================================================
 
 /**
@@ -90,6 +100,8 @@ typedef struct {
     int root_rank;              // Reduce操作的根节点rank（仅用于Reduce）
     uint32_t buffer[1036];      // 数据缓冲区（最大支持约4144字节数据）
 } agg_buffer_t;
+// agg_buffer_t agg_buffer[N]; 后续会有一个全局的agg_buffer_t数组存储聚合数据
+
 
 /**
  * @brief 时间戳结构
@@ -124,17 +136,24 @@ int arrival_state[FAN_IN][N];
 
 // 下行ACK状态：记录广播后是否收到了子节点的ACK
 int r_arrival_state[FAN_IN][N];
+// r_arrival_state[i][j] = 1 表示第i个子节点已经确认收到PSN为j的广播数据包
+// 每次广播前要清空对应PSN的r_arrival_state
+
 
 // 聚合缓冲区：存储正在聚合的数据
 // 每个PSN对应一个缓冲区，用于累加所有上行数据
+// 修改该数据的时候要加锁
 agg_buffer_t agg_buffer[N];
 
 // 聚合度计数器：记录每个PSN已经收集到的上行数据份数
 // 当agg_degree[i] == FAN_IN时，表示聚合完成
+// 记得每次聚合前要清零
 int agg_degree[N];
 
 // 保护聚合操作的互斥锁
 pthread_mutex_t agg_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// 广播
 
 // 广播缓冲区：存储已经聚合完成的全局结果，用于向下广播
 agg_buffer_t bcast_buffer[N];
@@ -146,11 +165,15 @@ int r_degree[N];
 // 保护广播操作的互斥锁
 pthread_mutex_t r_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+
 // PSN管理：记录每个连接期望的下一个数据包序号
-int agg_epsn[FAN_IN];      // 上行连接期望的PSN
-int down_epsn;             // 下行连接期望的PSN
+int agg_epsn[FAN_IN];      // 上行连接（其它的传给自己）期望其它的PSN
+int down_epsn;             // 下行连接（自己传给其他人）期望的PSN
 int latest_ack[FAN_IN];    // 上行连接最后确认的PSN
 int down_ack;              // 下行连接最后确认的PSN
+// 目前好像是停等协议？
+// 不太清楚，得看是怎么使用它们的
+
 
 // 连接信息：包含所有上行和下行连接的配置
 // conns[0..FAN_IN-1]: 上行连接（来自子节点或上级交换机）
@@ -162,18 +185,26 @@ int root; // 标识是否为根交换机（1-是，0-否）
 // Reduce操作支持：rank到连接ID的映射
 // rank_to_conn[rank] = connection_id，用于Reduce操作时找到目标rank的连接
 int rank_to_conn[FAN_IN];  // 最多支持FAN_IN个子节点
+// [BUG] 目前仅支持FAN_IN个子节点的系统
+// [BUG] 应该大小为rank + 1，然后spine交换机要对应路由
+
+
+
 
 // 当前操作的全局元数据（从PSN=0提取，供后续PSN使用）
-int current_operation_type = 0;  // 0=AllReduce, 1=Reduce
+primitive_type_t current_operation_type = OPERATION_TYPE_ALLREDUCE;  // 0=AllReduce, 1=Reduce
 int current_root_rank = 0;       // Reduce操作的根节点
+// [IMPROVE] 我觉得应该让每个PSN都带着，这样可以支持不同PSN使用不同的操作类型
+
 
 // 路由表：根据源IP和目标IP查找对应的转发规则
 rule_table_t table;
+// [BUG] 目前的路由表有问题，应该根据原语种类来决定规则
+// [BUG] 即：应该根据[src_ip, dst_ip, operation_type]来查找规则
 
 // 线程池：用于并行处理多播发送任务
 threadpool thpool;
 
-int parse_finish = 0;  // 标诈配置解析是否完成
 
 // =====================================================================================
 
@@ -189,11 +220,12 @@ int parse_finish = 0;  // 标诈配置解析是否完成
  * @param arg 控制器IP地址字符串
  * @return NULL
  */
-static void *controller_thread(void *arg){
+
+static void *controller_thread(void *arg){ // arg 是 controller ip
     const char *controller_ip = (char *)arg;
     int sockfd;
     struct sockaddr_in controller_addr;
-    FILE* file;
+    
     char buffer[4096];
     ssize_t bytes_received;
     int switch_id;
@@ -225,12 +257,12 @@ static void *controller_thread(void *arg){
     printf("Connected to %s:%d\n", controller_ip, CONTROLLER_SWITCH_PORT);
 
     // 接收交换机ID（四字节整型）
+    // [IMPROVE] 我觉得这里应该用握手协议，接受完ID后，回复一个确认包，之后再接收文件
     size_t total_received = 0;
     while (total_received < sizeof(switch_id)) {
         ssize_t ret = recv(sockfd, (char*)&switch_id + total_received, sizeof(switch_id) - total_received, 0);
         if (ret <= 0) {
             perror("Failed to receive switch_id");
-            fclose(file);
             close(sockfd);
             return NULL;
         }
@@ -241,13 +273,22 @@ static void *controller_thread(void *arg){
     // 接收网络拓扑配置文件（YAML格式）
     // 文件保存在/home/ubuntu/topology.yaml
     receive_file(sockfd, "/home/ubuntu/topology.yaml");
+    // [IMPROVE] 相对路径寻址吧。或者就绝对路径，但是/home/ubuntu/感觉不太好
+    printf("Received topology configuration file.\n");
 
     close(sockfd);
 
     // 解析YAML文件，获取交换机配置信息
     // 输出：root标识和conns连接数组
-    parse_config("/home/ubuntu/topology.yaml", 10, &root, switch_id, conns);
-
+    
+    if(parse_config("/home/ubuntu/topology.yaml", MAX_CONNECTIONS, &root, switch_id, conns) < 0){
+        fprintf(stderr, "Failed to parse topology configuration.\n");
+        return NULL;
+    }
+    // [IMPROVE] 这里应该用相对路径或者配置路径
+    // [IMPROVE] 这里controller发送的topology是一个统一的文件，交换机自己遍历，解析出自己的配置
+    // 但是我觉得让controller来选择，专门发一个交换机的配置会更好一些
+    
     return NULL;
 }
 
@@ -274,38 +315,11 @@ void init_all(const char *controller_ip) {
         return;
     }
     pthread_join(tid_controller, NULL);  // 等待控制器线程完成
-    // 此处修改连接配置
-    // root = 1;
-    // uint8_t peer_macs[FAN_IN + 1][6] = {
-    //     {0x52, 0x54, 0x00, 0x52, 0x5d, 0xae},
-    //     {0x52, 0x54, 0x00, 0x5e, 0x4c, 0xb0},
-    //     {}
-    // };
-    // char *peer_ips[FAN_IN + 1] = {
-    //     "10.50.183.49",
-    //     "10.50.183.102",
-    //     ""
-    // };
+    
+
     for(int i = 0; i < FAN_IN + 1; i++) {
-        if(root == 1 && i == FAN_IN)
+        if(root == 1 && i == FAN_IN) // 根节点且conns[FAN_IN]是往上传的链接，是不存在的
             continue;
-        
-        
-        
-        // uint8_t my_mac[6] = {0x52, 0x54, 0x00, 0x46, 0x57, 0x82};
-        // // uint8_t peer_mac[6] = {0x52, 0x54, 0x00, 0xdf, 0x0c, 0x28};
-        // memcpy(conns[i].my_mac, my_mac, 6);
-        // memcpy(conns[i].peer_mac, peer_macs[i], 6);
-
-        // conns[i].my_ip = get_ip("10.50.183.69");
-        // // conns[i].peer_ip = get_ip("10.50.183.146");
-        // conns[i].peer_ip = get_ip(peer_ips[i]);
-
-        // conns[i].my_port = 23333 + i;
-        // conns[i].peer_port = 4791;
-
-        // conns[i].my_qp = 28 + i;
-        // conns[i].peer_qp = 0x11; // 待填
         
         conns[i].psn = 0;
         conns[i].msn = 0;
@@ -315,11 +329,10 @@ void init_all(const char *controller_ip) {
 
         char errbuf[PCAP_ERRBUF_SIZE];
         conns[i].handle = pcap_create(conns[i].device, errbuf);
-        //conns[i].handle = pcap_create("ens3", errbuf);
-        pcap_set_snaplen(conns[i].handle, BUFSIZ);
-        pcap_set_promisc(conns[i].handle, 1);
-        pcap_set_timeout(conns[i].handle, 1);  // 1ms timeout
-        pcap_set_immediate_mode(conns[i].handle, 1);
+        pcap_set_snaplen(conns[i].handle, BUFSIZ); // 设置捕获长度
+        pcap_set_promisc(conns[i].handle, 1); // 设置混杂模式，接收所有经过的数据包
+        pcap_set_timeout(conns[i].handle, 1);  // pcap等待1ms就返回
+        pcap_set_immediate_mode(conns[i].handle, 1); // 设置为立即模式，收到数据包立即交付给应用程序
         if (pcap_activate(conns[i].handle) != 0) {
             fprintf(stderr, "pcap_activate failed: %s\n", pcap_geterr(conns[i].handle));
             return;
@@ -336,26 +349,29 @@ void init_all(const char *controller_ip) {
     memset(agg_buffer, 0, sizeof(agg_buffer));
     memset(agg_degree, 0, sizeof(agg_degree));
     memset(bcast_buffer, 0, sizeof(bcast_buffer));
-    // memset(bcast_arrival_state, 0, sizeof(bcast_arrival_state));
     memset(r_degree, 0, sizeof(r_degree));
-    // memset(agg_psn, 0, sizeof(agg_psn));
-    // for(int i = 0; i < N; i++) {
-    //     agg_psn[i] = i;
-    // }
+    
     for(int i = 0; i < FAN_IN; i++) {
         agg_epsn[i] = 0;
         latest_ack[i] = -1;
-        rank_to_conn[i] = i;  // 默认映射：rank i 对应连接 i
+        rank_to_conn[i] = i;  
+        // [BUG] 这里有问题的，应该让controller来配置rank到连接的映射
+
     }
+
     down_epsn = 0;
     down_ack = -1;
 
     memset(&table, 0, sizeof(table));
-    for(int i = 0; i < FAN_IN + 1; i++) {
-        if(root == 1 && i == FAN_IN)
-            continue;
 
+    // 下面构建规则表
+    for(int i = 0; i < FAN_IN + 1; i++) {
+        if(root == 1 && i == FAN_IN) // 根节点且conns[FAN_IN]是往上传的链接，是不存在的, 显然也不存在规则
+            continue;
+        
         rule_t rule;
+        // 收到一个包，就查询规则，所以规则里存的src_ip是对端的ip，dst_ip是自己的ip
+        //
         rule.src_ip = conns[i].peer_ip;
         rule.dst_ip = conns[i].my_ip;
         rule.id = i;
@@ -368,10 +384,14 @@ void init_all(const char *controller_ip) {
         if(root == 1 || (root == 0 && i == FAN_IN)) {
             // 1. 对于根交换机，所有上行入流的出流均是广播子节点
             // 2. 对于中间交换机的下行入流的出流均是广播子节点
+
+            // [QUESTION] 广播吗？是广播后host过滤，还是说交换机做选择性转发？
+
             for(int j = 0; j < FAN_IN; j++) { // 广播
                 rule.out_conns[j] = &conns[j];
                 rule.out_conns_cnt++;
             }
+
         } else {
             // 中间交换机的上行入流
             rule.out_conns[0] = &conns[FAN_IN];
@@ -391,10 +411,11 @@ void init_all(const char *controller_ip) {
  *
  * 用于向线程池传递发送任务的参数
  */
+
 typedef struct {
     connection_t* conn;     // 目标连接
     int type;               // 数据包类型（ACK/NAK/DATA）
-    void* data;             // 数据缓冲区
+    void* data;             // 数据缓冲区 （以网络字节序存储)
     int len;                // 数据长度（以uint32_t为单位）
     uint32_t psn;           // 包序号
     int packet_type;        // RDMA操作类型（opcode）
@@ -442,9 +463,7 @@ void send_packets_multithread(rule_t* rule, int type, void* data, int len, uint3
         args[i].psn = psn;
         args[i].packet_type = packet_type;
 
-        // if (pthread_create(&threads[i], NULL, send_packet_thread, &args[i]) != 0) {
-        //     perror("Failed to create thread");
-        // }
+        
         thpool_add_work(thpool, send_packet_thread, &args[i]);
     }
 
@@ -475,7 +494,7 @@ void forwarding(rule_t* rule, uint32_t psn, uint32_t type, uint32_t *data, int l
     // TODO: 待优化, 尤其 rule 的设计
     int id = rule->id;
     LOG_FUNC_ENTRY(id);
-    log_write(id, "conn_id: %d, forwarding... psn: %d, type: %d, len: %d\n", id, psn,type, len);
+    printf("conn_id: %d, forwarding... psn: %d, type: %d, len: %d\n", id, psn,type, len);
 
     if(type == PACKET_TYPE_ACK || type == PACKET_TYPE_NAK) {
         // ACK/NAK包：单播发送
@@ -520,6 +539,9 @@ void forwarding(rule_t* rule, uint32_t psn, uint32_t type, uint32_t *data, int l
         }
 
     } else if (type == PACKET_TYPE_DATA_SINGLE) {
+
+        // [BUG] 这里是什么逻辑？？
+
         // 单播数据（重传使用）
         connection_t* conn = rule->ack_conn;
 
@@ -542,6 +564,7 @@ void forwarding(rule_t* rule, uint32_t psn, uint32_t type, uint32_t *data, int l
     LOG_FUNC_EXIT(id);
 }
 
+
 int retransmit(rule_t* rule, uint32_t psn) {
     int id = rule->id;
     rule_t* _rule = rule;
@@ -551,11 +574,16 @@ int retransmit(rule_t* rule, uint32_t psn) {
     LOG_FUNC_EXIT(id);
 }
 
+
+/**
+ * @brief 缓存并广播数据
+ *
+ * 缓存数据：将收到的父节点的全局聚合结果（用于广播的数据）存储到广播缓冲区中
+ * 更新状态：设置广播缓冲区的状态信息
+ * 触发广播：调用forwarding函数将数据广播给所有子节点
+ */
 int cache(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_type, bool revert) {
     // 缓存数据, 此时是收到父节点的全局聚合结果(用于广播的数据)
-    // for(int i = 0; i < len; i++) {
-    //     bcast_buffer[Idx(psn)].buffer[i] = revert ? ntohl(data[i]) : data[i];;
-    // }
     assert(psn == down_epsn);
     down_epsn++;
     memcpy(bcast_buffer[Idx(psn)].buffer, data, len * sizeof(uint32_t));
@@ -570,6 +598,26 @@ int cache(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_type, 
     forwarding(rule, psn, PACKET_TYPE_DATA, bcast_buffer[Idx(psn)].buffer, len, packet_type);
 }
 
+/**
+ * @brief 处理下游节点（子节点或父节点）发来的ACK/NAK确认包
+ *
+ * 该函数用于处理数据包发送后的确认响应，实现可靠的数据传输机制。
+ * 当交换机向下游发送数据包后，会等待接收方的确认。根据接收到的
+ * 是ACK还是NAK，函数会执行不同的操作来维护数据传输的可靠性。
+ *
+ * @param aeth 指向接收方发来的AETH（ACK Extended Transport Header）结构的指针，
+ *             包含确认类型（ACK/NAK）和序列号信息，网络字节序
+ * @param rule 指向路由规则的指针，用于确定发送方连接ID。
+ *             如果为NULL，表示确认来自父节点（根方向）
+ * @param psn  Packet Sequence Number，被确认的数据包序列号
+ *
+ * @note 函数内部实现了滑动窗口确认机制：
+ *       - 维护down_ack变量记录已确认的最大序列号
+ *       - 收到ACK时，清理已确认的数据包缓存
+ *       - 收到NAK时，重传丢失的数据包
+ *       - 使用互斥锁保护聚合缓冲区的并发访问
+ *
+ */
 void down_ack_handler(aeth_t* aeth, rule_t* rule, int psn) {
     int id;
     if(rule)
@@ -578,10 +626,20 @@ void down_ack_handler(aeth_t* aeth, rule_t* rule, int psn) {
         id = FAN_IN; // 父节点
 
     if((ntohl(aeth->syn_msn) >> 29) == 0) {
+        
         // 收到ACK
         log_write(id, "downstream ack...\n");
+        uint32_t syn_msn_val = ntohl(aeth->syn_msn);
+        uint8_t syndrome = syn_msn_val >> 29;
+        uint32_t msn = syn_msn_val & 0x1FFFFFFF;  // 低29位
+        printf("DEBUG: syn_msn=0x%08x, syndrome=%d, msn=%u, psn=%d\n",
+               syn_msn_val, syndrome, msn, psn);
+        fflush(stdout);
+        
         int tmp = psn;
         if(tmp > down_ack) {
+            // 这个psn比当前确认的还大，说明有新的确认到达
+            
             // 重置计时器
             ts_buffer[id].ts = get_now_ts();
             
@@ -670,13 +728,13 @@ void add_payload(uint32_t *restrict dst, const uint32_t *restrict src, int len) 
  * @param rule 路由规则（标识数据来源）
  * @param psn 包序号
  * @param data 数据缓冲区
- * @param len 数据长度
+ * @param len 数据长度(单位为uint32_t)
  * @param packet_type RDMA操作类型
  * @param operation_type 集合通信操作类型（OPERATION_ALLREDUCE或OPERATION_REDUCE）
  * @param root_rank Reduce操作的根节点rank（仅用于Reduce操作）
  * @return 成功标识
  */
-int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_type, int operation_type, int root_rank) {
+int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_type,  primitive_type_t operation_type, int root_rank) {
     int id = rule->id;
     LOG_FUNC_ENTRY(id);
 
@@ -754,7 +812,7 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
             if (bcast_buffer[Idx(psn)].state == 1) {
                 assert(0);  // 不应该发生，缓冲区已被占用
             } else {
-                if(operation_type == OPERATION_ALLREDUCE) {
+                if(operation_type == OPERATION_TYPE_ALLREDUCE) {
                     // AllReduce操作：广播到所有子节点
                     log_write(id, "AllReduce: broadcasting to all nodes, psn: %d\n", psn);
 
@@ -765,7 +823,7 @@ int aggregate(rule_t* rule, uint32_t psn, uint32_t *data, int len, int packet_ty
                     // 缓存聚合结果并开始广播
                     cache(rule, psn, agg_buffer[Idx(psn)].buffer, len, packet_type, false);
                     down_ack_handler(&aeth, NULL, psn);
-                } else if(operation_type == OPERATION_REDUCE) {
+                } else if(operation_type == OPERATION_TYPE_REDUCE) {
                     // Reduce操作：仅发送到指定的根rank节点
                     printf("[SWITCH] REDUCE operation: sending to root_rank=%d, PSN=%u\n", root_rank, psn);
                     fflush(stdout);
@@ -914,23 +972,23 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
             if (psn < down_epsn) {
                 // 滞后
                 log_write(id, "lag\n");
-                forwarding(rule, down_epsn - 1, PACKET_TYPE_ACK, NULL, 0, 0);
+                forwarding(rule, down_epsn - 1, PACKET_TYPE_ACK, NULL, 0, 0x11);
             } else if (psn > down_epsn) {
                 log_write(id, "ahead\n");
-                forwarding(rule, down_epsn, PACKET_TYPE_NAK, NULL, 0, 0);
+                forwarding(rule, down_epsn, PACKET_TYPE_NAK, NULL, 0, 0x11);
             } else {
                 // 持平
                 log_write(id, "equal\n");
                 if (bcast_buffer[Idx(psn)].state == 1) {
                     assert(0); // 这个其实是说明已经快了一轮
                     log_write(id, "retransmit\n");
-                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0);
+                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0x11);
                 } else {
                     // 首传
                     log_write(id, "first\n");
                     
                     // 发送ACK
-                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0);
+                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0x11);
                     // 缓存模块
                     cache(rule, psn, data, data_len, bth->opcode, true); // epsn++
                 }
@@ -942,11 +1000,11 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
                 // 滞后
                 // 发送ACK
                 log_write(id, "lag\n");
-                forwarding(rule, agg_epsn[id] - 1, PACKET_TYPE_ACK, NULL, 0, 0);
+                forwarding(rule, agg_epsn[id] - 1, PACKET_TYPE_ACK, NULL, 0, 0x11);
             } else if (psn > agg_epsn[id]) {
                 // 超前/乱序
                 log_write(id, "ahead\n");
-                forwarding(rule, agg_epsn[id], PACKET_TYPE_NAK, NULL, 0, 0);
+                forwarding(rule, agg_epsn[id], PACKET_TYPE_NAK, NULL, 0, 0x11);
             } else {
                 // 持平
                 log_write(id, "equal\n");
@@ -955,7 +1013,7 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
                     assert(0); // 这个其实是说明已经快了一轮, 当发送方窗口较小时,不可能发生 => 这里可以加个流控机制
                     log_write(id, "retransmit\n");
                     // 发送ACK
-                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0);
+                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0x11);
                 } else {
                     // 首传
                     log_write(id, "first\n");
@@ -963,11 +1021,11 @@ void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr, const 
                     // r_arrival_state[id][Idx(psn)] = 0;
 
                     // 发送ACK
-                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0);
+                    forwarding(rule, psn, PACKET_TYPE_ACK, NULL, 0, 0x11);
 
                     // 从数据包中提取操作类型和根rank信息
                     // 只有PSN=0的消息包含元数据，PSN>0使用全局变量
-                    int operation_type = OPERATION_ALLREDUCE;
+                    primitive_type_t operation_type = OPERATION_TYPE_ALLREDUCE;
                     int root_rank = 0;
 
                     if(psn == 0 && data_len >= 2) {

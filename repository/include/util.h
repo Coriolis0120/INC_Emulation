@@ -55,6 +55,17 @@ typedef struct {
 	uint32_t len;
 } reth_header_t;
 
+// 协议定义的控制头
+typedef struct 
+{
+    uint16_t destination_rank; // 若为Allreduce和Broadcast，则为0xffff，如果为reduce，则为目的rank号。
+    uint8_t primitive_operator_dataType; // 4bits primitive + 2bits Operator + 2bits unused
+    // primitive: 00-Allreduce，01-Reduce，10-Broadcast，11-Undifined
+    uint8_t Data_type; // 4bits Data_type + 4 bits unused.  0000-int32, 0001-float32 
+    
+} ctl_header_t;
+
+
 
 typedef struct {
     char device[16]; // 网卡设备名
@@ -68,19 +79,21 @@ typedef struct {
 
     uint32_t my_qp;
     uint32_t peer_qp;
-    uint32_t psn;
-    uint32_t msn;
-
-    int ok;
+    uint32_t psn; // 用于记录该connection下一个发送的包的psn
+    uint32_t msn; // 用于记录max sequence number
+    int ok; // 连接状态标志（连接是否可用）
 
     pcap_t *handle;
 } connection_t;
 
-#define PACKET_TYPE_DATA 0
-#define PACKET_TYPE_ACK 1
-#define PACKET_TYPE_NAK 2
-#define PACKET_TYPE_DATA_SINGLE 3
-#define PACKET_TYPE_RETH 4
+typedef enum {
+    PACKET_TYPE_DATA,
+    PACKET_TYPE_ACK,
+    PACKET_TYPE_NAK,
+    PACKET_TYPE_DATA_SINGLE,
+    PACKET_TYPE_RETH,
+    PACKET_TYPE_CONTROLL
+} packet_type_t;
 
 #define PAYLOAD_LEN 1024 // mtu bytes
 #define ELEMENT_SIZE sizeof(int32_t)
@@ -119,12 +132,12 @@ void print_all(int id, const char* packet);
 
 uint32_t build_eth_packet
 (
-    char *dst_packet, int type, char *data, int data_len, 
+    char *dst_packet, packet_type_t type, char *data, int data_len, 
     char *src_mac, char *dst_mac,
     uint32_t src_ip, uint32_t dst_ip,
     uint16_t src_port, uint16_t dst_port,
     uint32_t qp, uint32_t psn, 
-    uint32_t msn, int packet_type, const uint8_t *reth
+    uint32_t msn, int _opcode, const uint8_t *reth
 );
 
 uint64_t get_now_ts();

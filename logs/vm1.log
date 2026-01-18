@@ -1,11 +1,10 @@
 ---- VM1 Log ----
-=== Reduce Test Configuration ===
+=== AllReduce Test Configuration ===
 world_size: 2
 master_addr: 192.168.0.6
 rank: 0
-root_rank: 0
 data_count: 4096
-==================================
+====================================
 
 Rank 0: Initialized input data (first 5 elements): 0 1 2 3 4 
 Rank 0: Creating communication group...
@@ -43,7 +42,7 @@ group id: 1!
 Rank 0: Creating communicator...
 my QP number = 18
 rank0 qp num 18
-rank1 qp num 81
+rank1 qp num 107
 File received and saved to: /root/NetLab/topology.yaml
 send file to fd: 6 succeed.
 parse yaml
@@ -54,36 +53,42 @@ mtu: 3
 ret of rtr 0
 qp status: 2
 ret of rts 0
-Rank 0: Starting Reduce operation...
-Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=5
-Reduce root rank 0: post recv ret 0
-Reduce root rank 0: post recv ret 0
-Reduce root rank 0: post recv ret 0
-Reduce root rank 0: post recv ret 0
-Reduce root rank 0: post recv ret 0
-Rank 0: Prepared msg 0 with metadata: op=1 root=0, data[0..1021]
-Rank 0: Prepared msg 1, data[1022..2045]
-Reduce root send success
-Reduce root send success
-Reduce root receive success
-Reduce root: received msg 0 (with metadata), data[0..1021]
-Reduce root receive success
-Reduce root: received msg 1, data[1022..2045]
-Reduce root send success
-Reduce root send success
-Reduce root receive success
-Reduce root receive success
-Reduce root send success
-Reduce root receive success
-Reduce operation completed for rank 0
-Reduce operation completed, Time taken: 2.024000 milliseconds
+Rank 0: Starting AllReduce operation...
+i: 0, post recv ret 0
+i: 1, post recv ret 0
+i: 2, post recv ret 0
+i: 3, post recv ret 0
+send success
+send success
+receive success
+recv[0][0]: net=0x00000000, host=0, stored=0
+recv[0][1]: net=0x01000000, host=1, stored=1
+recv[0][2]: net=0x06000000, host=6, stored=6
+send success
+receive success
+recv[1][0]: net=0x000c0000, host=3072, stored=3072
+recv[1][1]: net=0x030c0000, host=3075, stored=3075
+recv[1][2]: net=0x060c0000, host=3078, stored=3078
+send success
+receive success
+recv[2][0]: net=0x00180000, host=6144, stored=6144
+recv[2][1]: net=0x03180000, host=6147, stored=6147
+recv[2][2]: net=0x06180000, host=6150, stored=6150
+receive success
+recv[3][0]: net=0x00240000, host=9216, stored=9216
+recv[3][1]: net=0x03240000, host=9219, stored=9219
+recv[3][2]: net=0x06240000, host=9222, stored=9222
+AllReduce operation completed, Time taken: 15.400000 milliseconds
 
-=== Root Rank 0: Verifying Reduce Result ===
+=== Rank 0: Verifying AllReduce Result ===
 Expected multiplier: 3 (sum of 1..2)
 
 First 10 elements:
   idx 0: in_data=0, dst_data=0, expected=0 ✓
-  idx 1: in_data=1, dst_data=3, expected=3 ✓
+  idx 1: in_data=1, dst_data=1, expected=3 ✗
+
+ERROR: Mismatch detected!
+  ERROR at idx 1: got 1, expected 3
   idx 2: in_data=2, dst_data=6, expected=6 ✓
   idx 3: in_data=3, dst_data=9, expected=9 ✓
   idx 4: in_data=4, dst_data=12, expected=12 ✓
@@ -93,13 +98,11 @@ First 10 elements:
   idx 8: in_data=8, dst_data=24, expected=24 ✓
   idx 9: in_data=9, dst_data=27, expected=27 ✓
 
-SUCCESS: All 4096 elements verified correctly!
-Root rank 0 received correct aggregated result.
+FAILED: Result verification failed!
 
 === Test Summary ===
-Operation: Reduce
+Operation: AllReduce
 World size: 2
-Root rank: 0
 Current rank: 0
 Data count: 4096 elements
 ====================

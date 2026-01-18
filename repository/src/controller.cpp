@@ -124,6 +124,9 @@ static void group_session(int client_fd) {
             
             // 同步将路由文件传给 rank0，让其感知拓扑
             send_file_with_length(client_fd, "/root/topology.yaml");
+        }else if(req_type == 'R'){
+            // 编写规则
+            
         }
     }
 

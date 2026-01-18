@@ -157,6 +157,7 @@ void init_crc32_table() {
         }
     }
 }
+
 uint32_t crc32(const void *data, size_t length) {
     const uint8_t *buf = (const uint8_t *)data;
     uint32_t crc = 0xFFFFFFFF;
@@ -248,7 +249,7 @@ uint32_t crc32(const void *data, size_t length) {
 
 // 计算 RoCEv2 ICRC
 uint32_t compute_icrc(int id, const char* eth_packet) {
-    // clock_t start = clock();
+    clock_t start = clock();
     ipv4_header_t* iip = (ipv4_header_t*)(eth_packet + sizeof(eth_header_t));
     int len = ntohs(iip->total_length) - 4; // 减去 icrc
 
@@ -269,19 +270,19 @@ uint32_t compute_icrc(int id, const char* eth_packet) {
     udp->checksum = udp->checksum | 0xFFFF;
     bth->qpn = bth->qpn | 0x000000FF;
 
-    // printf("crc ***********************************\n");
-    // for(int i = 0; i < len; i++) {
-    //     printf("%02x ", (unsigned char)pack[i]);
-    // }
-    // printf("\n");
-    // printf("crc ***********************************\n");
+    printf("crc ***********************************\n");
+    for(int i = 0; i < len; i++) {
+        printf("%02x ", (unsigned char)pack[i]);
+    }
+    printf("\n");
+    printf("crc ***********************************\n");
 
-    // uint32_t tmp = crc32(pack, len);
-    // clock_t end = clock();
+    uint32_t tmp = crc32(pack, len);
+    clock_t end = clock();
 
-    // double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
-    // printf("%s, Time taken: %f seconds\n", "build eth pack", elapsed_time);
-    // return tmp;
+    double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
+    printf("%s, Time taken: %f seconds\n", "build eth pack", elapsed_time);
+    return tmp;
     return crc32(pack, len);
 }
 
@@ -330,12 +331,12 @@ void print_all(int id, const char* packet) {
 
 uint32_t build_eth_packet
 (
-    char *dst_packet, int type, char *data, int data_len, 
+    char *dst_packet, packet_type_t type, char *data, int data_len, 
     char *src_mac, char *dst_mac,
     uint32_t src_ip, uint32_t dst_ip,
     uint16_t src_port, uint16_t dst_port,
     uint32_t qp, uint32_t psn, 
-    uint32_t msn, int packet_type, const uint8_t *reth
+    uint32_t msn, int _opcode, const uint8_t *reth
 ) {
     // clock_t start = clock();
     uint16_t total_len = sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t) + data_len + 4; // 4 为icrc
@@ -343,7 +344,10 @@ uint32_t build_eth_packet
         total_len += sizeof(aeth_t);
     else if(type == PACKET_TYPE_RETH)
         total_len += sizeof(reth_header_t);
-
+    else if(type == PACKET_TYPE_CONTROLL){
+        total_len += sizeof(ctl_header_t);
+    }
+    
     // 1. eth hdr
     eth_header_t* eth = (eth_header_t*)dst_packet;
     memcpy(eth->src_mac, src_mac, 6);
@@ -375,7 +379,7 @@ uint32_t build_eth_packet
     // 4. bth hdr
     bth_header_t* bth = (bth_header_t*)(dst_packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t));
     if(type == PACKET_TYPE_DATA || type == PACKET_TYPE_RETH)
-        bth->opcode = packet_type;
+        bth->opcode = _opcode;
     else
         bth->opcode = 0x11;
 
@@ -392,10 +396,12 @@ uint32_t build_eth_packet
         aeth_t* aeth = (aeth_t*)(dst_packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
         if(type == PACKET_TYPE_ACK)
             aeth->syn_msn = htonl(msn | 0x1f000000);
+            // QUESTION: 为什么是0001 1111 ? 
         else if(type == PACKET_TYPE_NAK)
             aeth->syn_msn = htonl(msn | 0x60000000); //高8位: 0110 0000 => psn seq error
     }
 
+    
     // 6. data
     if(type == PACKET_TYPE_DATA) {
         unsigned char* d = (unsigned char*)(dst_packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
@@ -420,6 +426,15 @@ uint32_t build_eth_packet
         for(int i = 0; i < data_len / 4; i++) {
             ((uint32_t*)d)[i] = htonl(((uint32_t*)data)[i]);
         }
+    }
+    
+    // 8. ctl
+    if(type == PACKET_TYPE_CONTROLL){
+        ctl_header_t* ctl = (ctl_header_t*)(dst_packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) + sizeof(udp_header_t) + sizeof(bth_header_t));
+        ctl_header_t* src_ctl = (ctl_header_t*)data;
+        ctl->destination_rank = htons(src_ctl->destination_rank);
+        ctl->primitive_operator_dataType = src_ctl->primitive_operator_dataType;  // uint8_t 不需要转换
+        ctl->Data_type = src_ctl->Data_type;  // uint8_t 不需要转换
     }
 
     // 8. icrc
