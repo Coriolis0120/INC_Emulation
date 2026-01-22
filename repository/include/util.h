@@ -7,6 +7,13 @@
 #include <sys/time.h>
 #include <pcap.h>
 
+typedef enum {
+    OPERATION_TYPE_NULL = 0,
+    OPERATION_TYPE_ALLREDUCE = 1,
+    OPERATION_TYPE_REDUCE = 2,
+    OPERATION_TYPE_BROADCAST = 3
+} primitive_type_t;
+
 typedef struct {
     uint8_t  dst_mac[6];
     uint8_t  src_mac[6];

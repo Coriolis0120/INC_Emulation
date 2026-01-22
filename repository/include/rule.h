@@ -6,9 +6,8 @@
 #include <stdint.h>
 #include <pcap.h>
 #include "util.h"
+#include "parameter.h"
 
-#define MAX_RULES 100
-#define MAX_PORT_NUM 10
 
 enum Direction {
     DIR_UP,

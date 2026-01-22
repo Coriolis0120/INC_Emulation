@@ -122,8 +122,6 @@ typedef struct {
  * 这些变量支持交换机的核心功能：数据聚合、广播、流控和重传
  */
 
-// 通信组（未使用）
-struct inccl_communicator* comms[FAN_IN];
 
 // 入流控制：记录上行数据包是否已经到达
 // arrival_state[i][j] = 1 表示从第i个上行连接收到的PSN为j的数据包已到达
