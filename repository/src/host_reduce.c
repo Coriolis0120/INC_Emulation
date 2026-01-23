@@ -173,11 +173,7 @@ int main(int argc, char *argv[]) {
     printf("Data count: %d elements\n", IN_DATA_COUNT);
     printf("====================\n");
 
-    // 清理资源
-    inccl_communicator_destroy(comm);
-    inccl_group_destroy(group);
-
     printf("\nRank %d: Test completed.\n", rank);
-    
+
     return 0;
 }

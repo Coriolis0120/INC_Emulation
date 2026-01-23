@@ -78,11 +78,9 @@
 
 #define Idx(psn) ((psn) % N)  // 根据PSN计算循环缓冲区索引
 
-// 集合通信操作类型定义
-typedef enum {
-    OPERATION_TYPE_ALLREDUCE = 0,
-    OPERATION_TYPE_REDUCE = 1
-} primitive_type_t;
+// 集合通信操作类型定义 (使用 util.h 中的 primitive_type_t)
+// PRIMITIVE_TYPE_ALLREDUCE = 1
+// PRIMITIVE_TYPE_REDUCE = 2
 
 // =====================================================================================
 

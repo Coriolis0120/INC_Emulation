@@ -72,6 +72,7 @@ typedef struct {
     int down_epsn;                  // 期望的下行PSN
     int latest_ack[MAX_CONNECTIONS_NUM];         // 最后确认的上行PSN
     int down_ack;                   // 最后确认的下行PSN
+    int send_psn[MAX_CONNECTIONS_NUM];           // 每个连接的发送PSN（用于下行广播）
     
     // === 路由和映射 ===
     rule_table_t routing_table;     // 替代全局 table
@@ -80,6 +81,7 @@ typedef struct {
     // === 元数据 (跨PSN共享) ===
     primitive_type_t operation_type; // 替代 current_operation_type
     int root_rank;                   // 替代 current_root_rank
+    int ctrl_psn;                    // 当前操作的控制消息 PSN（用于计算相对 PSN）
     pthread_mutex_t meta_mutex;      // 保护元数据访问
     
     // === 资源 ===
@@ -131,15 +133,5 @@ void switch_context_reset_psn_states(switch_context_t *ctx);
  * @param ctx 交换机上下文指针
  */
 void switch_context_print(switch_context_t *ctx);
-
-/**
- * @brief 将交换机上下文导出为YAML格式
- *
- * @param ctx 交换机上下文指针
- * @param filename 输出文件名
- * @return 0表示成功，-1表示失败
- */
-int switch_context_export_yaml(switch_context_t *ctx, const char *filename);
-
 
 #endif // SWITCH_CONTEXT_H

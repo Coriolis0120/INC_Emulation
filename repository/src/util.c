@@ -270,20 +270,19 @@ uint32_t compute_icrc(int id, const char* eth_packet) {
     udp->checksum = udp->checksum | 0xFFFF;
     bth->qpn = bth->qpn | 0x000000FF;
 
-    printf("crc ***********************************\n");
-    for(int i = 0; i < len; i++) {
-        printf("%02x ", (unsigned char)pack[i]);
-    }
-    printf("\n");
-    printf("crc ***********************************\n");
+    // printf("crc ***********************************\n");
+    // for(int i = 0; i < len; i++) {
+    //     printf("%02x ", (unsigned char)pack[i]);
+    // }
+    // printf("\n");
+    // printf("crc ***********************************\n");
 
     uint32_t tmp = crc32(pack, len);
-    clock_t end = clock();
+    // clock_t end = clock();
 
-    double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
-    printf("%s, Time taken: %f seconds\n", "build eth pack", elapsed_time);
+    // double elapsed_time = (double)(end - start) / CLOCKS_PER_SEC;
+    // printf("%s, Time taken: %f seconds\n", "build eth pack", elapsed_time);
     return tmp;
-    return crc32(pack, len);
 }
 
 int is_icrc_valid(int id, const char* packet) {

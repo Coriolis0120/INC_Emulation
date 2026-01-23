@@ -8,11 +8,56 @@
 #include <pcap.h>
 
 typedef enum {
-    OPERATION_TYPE_NULL = 0,
-    OPERATION_TYPE_ALLREDUCE = 1,
-    OPERATION_TYPE_REDUCE = 2,
-    OPERATION_TYPE_BROADCAST = 3
+    PRIMITIVE_TYPE_NULL = 0,
+    PRIMITIVE_TYPE_ALLREDUCE = 1,
+    PRIMITIVE_TYPE_REDUCE = 2,
+    PRIMITIVE_TYPE_BROADCAST = 3
 } primitive_type_t;
+
+// ==================== 控制包协议定义 ====================
+// 使用 RDMA Send with Immediate 的 32-bit immediate data 传递元数据
+// 格式: [Destination Rank: 16 bits][Primitive: 2 bits][Operator: 2 bits][Data Type: 4 bits][Reserved: 8 bits]
+
+// Primitive 类型 (2 bits)
+#define CTL_PRIMITIVE_ALLREDUCE  0x00  // 00
+#define CTL_PRIMITIVE_REDUCE     0x01  // 01
+#define CTL_PRIMITIVE_BROADCAST  0x02  // 10
+
+// Operator 类型 (2 bits)
+#define CTL_OPERATOR_BARRIER     0x00  // 00
+#define CTL_OPERATOR_SUM         0x01  // 01
+#define CTL_OPERATOR_MAX         0x02  // 10
+#define CTL_OPERATOR_MIN         0x03  // 11
+
+// Data Type (4 bits)
+#define CTL_DATATYPE_INT32       0x00  // 0000
+#define CTL_DATATYPE_FLOAT32     0x01  // 0001
+
+// 特殊 Destination Rank 值
+#define CTL_DEST_RANK_ALL        0xFFFF  // AllReduce/Broadcast 使用
+
+// Immediate Data 构建宏
+// 格式: [dest_rank:16][primitive:2][operator:2][datatype:4][reserved:8]
+#define BUILD_IMM_DATA(dest_rank, primitive, operator, datatype) \
+    ((((uint32_t)(dest_rank) & 0xFFFF) << 16) | \
+     (((uint32_t)(primitive) & 0x03) << 14) | \
+     (((uint32_t)(operator) & 0x03) << 12) | \
+     (((uint32_t)(datatype) & 0x0F) << 8))
+
+// Immediate Data 解析宏
+#define GET_IMM_DEST_RANK(imm)   (((imm) >> 16) & 0xFFFF)
+#define GET_IMM_PRIMITIVE(imm)   (((imm) >> 14) & 0x03)
+#define GET_IMM_OPERATOR(imm)    (((imm) >> 12) & 0x03)
+#define GET_IMM_DATATYPE(imm)    (((imm) >> 8) & 0x0F)
+
+// RDMA opcode 定义
+#define RDMA_OPCODE_SEND_ONLY           0x04
+#define RDMA_OPCODE_SEND_ONLY_WITH_IMM  0x05  // Send Only with Immediate
+#define RDMA_OPCODE_SEND_FIRST          0x00
+#define RDMA_OPCODE_SEND_MIDDLE         0x01
+#define RDMA_OPCODE_SEND_LAST           0x02
+#define RDMA_OPCODE_SEND_LAST_WITH_IMM  0x03  // Send Last with Immediate
+#define RDMA_OPCODE_ACK                 0x11
 
 typedef struct {
     uint8_t  dst_mac[6];

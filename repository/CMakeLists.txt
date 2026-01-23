@@ -52,10 +52,12 @@ endif()
 add_executable(switch_v2
     termination_switch/src/switch_main.c
     termination_switch/src/switch_context.c
-    termination_switch/src/controller_comm.c
+    termination_switch/src/controller_comm.cpp
     third_party/C-Thread-Pool/thpool.c
-    src/rule.c)
-target_link_libraries(switch_v2 pthread pcap)
+    src/rule.c
+    src/util.c
+    src/log.c)
+target_link_libraries(switch_v2 pthread pcap ${YAML_CPP_STATIC})
 if(OPT_FLAGS)
     target_compile_options(switch_v2 PRIVATE ${OPT_FLAGS})
 endif()
@@ -78,6 +80,20 @@ add_executable(host src/host.c ${COMMON_SRCS} ${CONFIG_PARSER})
 target_link_libraries(host ibverbs pthread pcap ${YAML_CPP_STATIC})
 if(OPT_FLAGS)
     target_compile_options(host PRIVATE ${OPT_FLAGS})
+endif()
+
+# host_reduce (Reduce测试)
+add_executable(host_reduce src/host_reduce.c ${COMMON_SRCS} ${CONFIG_PARSER})
+target_link_libraries(host_reduce ibverbs pthread pcap ${YAML_CPP_STATIC})
+if(OPT_FLAGS)
+    target_compile_options(host_reduce PRIVATE ${OPT_FLAGS})
+endif()
+
+# host_multi_ops (多原语连续调用测试)
+add_executable(host_multi_ops src/host_multi_ops.c ${COMMON_SRCS} ${CONFIG_PARSER})
+target_link_libraries(host_multi_ops ibverbs pthread pcap ${YAML_CPP_STATIC})
+if(OPT_FLAGS)
+    target_compile_options(host_multi_ops PRIVATE ${OPT_FLAGS})
 endif()
 
 # controller

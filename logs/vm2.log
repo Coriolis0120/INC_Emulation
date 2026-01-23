@@ -1,12 +1,11 @@
 ---- VM2 Log ----
-=== AllReduce Test Configuration ===
+=== Multi-Operation Test ===
 world_size: 2
 master_addr: 192.168.0.6
 rank: 1
 data_count: 4096
-====================================
+============================
 
-Rank 1: Initialized input data (first 5 elements): 0 2 4 6 8 
 Rank 1: Creating communication group...
 devices num 1
 rxe_eth1
@@ -37,7 +36,7 @@ Link layer: 2 (0=IB, 1=Ethernet)
 my ip: 10.10.0.7
 connect to master success.
 Rank 1: Creating communicator...
-my QP number = 107
+my QP number = 133
 File received and saved to: /root/NetLab/topology.yaml
 parse yaml
 Remote QP number = 0xc
@@ -47,58 +46,160 @@ mtu: 3
 ret of rtr 0
 qp status: 2
 ret of rts 0
-Rank 1: Starting AllReduce operation...
+
+========== Test 1: Reduce (root=0) ==========
+Rank 1: Starting Reduce (root=0)...
+Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=4
+Rank 1: Prepared imm_data=0x00005000 (dest=0, prim=1, op=1, dtype=0)
+[CTRL] Sending control message with imm_data=0x00005000
+[CTRL] Control message sent successfully
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce non-root rank 1 send success
+Reduce operation completed for rank 1
+Reduce (root=0) completed, Time taken: 1.425000 milliseconds
+  [Rank 1] Non-root, skipping verification
+
+========== Test 2: AllReduce ==========
+Rank 1: Starting AllReduce...
+AllReduce: len=4096, PAYLOAD_COUNT=1024, message_num=4
+AllReduce: Prepared imm_data=0xFFFF1000 (dest=0xFFFF, prim=0, op=1, dtype=0)
+[CTRL] Sending control message with imm_data=0xFFFF1000
+[CTRL] Control message sent successfully
 i: 0, post recv ret 0
 i: 1, post recv ret 0
 i: 2, post recv ret 0
 i: 3, post recv ret 0
-send success
-receive success
-recv[0][0]: net=0x00000000, host=0, stored=0
-recv[0][1]: net=0x01000000, host=1, stored=1
-recv[0][2]: net=0x06000000, host=6, stored=6
-send success
-receive success
-recv[1][0]: net=0x000c0000, host=3072, stored=3072
-recv[1][1]: net=0x030c0000, host=3075, stored=3075
-recv[1][2]: net=0x060c0000, host=3078, stored=3078
-send success
-receive success
-recv[2][0]: net=0x00180000, host=6144, stored=6144
-recv[2][1]: net=0x03180000, host=6147, stored=6147
-recv[2][2]: net=0x06180000, host=6150, stored=6150
-send success
-receive success
-recv[3][0]: net=0x00240000, host=9216, stored=9216
-recv[3][1]: net=0x03240000, host=9219, stored=9219
-recv[3][2]: net=0x06240000, host=9222, stored=9222
-AllReduce operation completed, Time taken: 15.043000 milliseconds
+[AllReduce] Starting poll loop: waiting for 4 messages, sent 2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=0, byte_len=4096
+[AllReduce] SEND success for wr_id=0
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=1, byte_len=4096
+[AllReduce] SEND success for wr_id=1
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=0, byte_len=4096
+[AllReduce] RECV success for wr_id=0
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=1, byte_len=4096
+[AllReduce] RECV success for wr_id=1
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=2, byte_len=4096
+[AllReduce] SEND success for wr_id=2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=2, byte_len=4096
+[AllReduce] RECV success for wr_id=2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=3, byte_len=4096
+[AllReduce] SEND success for wr_id=3
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=3, byte_len=4096
+[AllReduce] RECV success for wr_id=3
+[AllReduce] Completed: received all 4 messages
+AllReduce completed, Time taken: 0.735000 milliseconds
+  [Rank 1] AllReduce result verified: PASS (first 3: 0, 3, 6)
 
-=== Rank 1: Verifying AllReduce Result ===
-Expected multiplier: 3 (sum of 1..2)
+========== Test 3: Reduce (root=1) ==========
+Rank 1: Starting Reduce (root=1)...
+Reduce: len=4096, PAYLOAD_COUNT=1024, message_num=4
+Rank 1: Prepared imm_data=0x00015000 (dest=1, prim=1, op=1, dtype=0)
+[CTRL] Sending control message with imm_data=0x00015000
+[CTRL] Control message sent successfully
+Reduce root rank 1: post recv ret 0
+Reduce root rank 1: post recv ret 0
+Reduce root rank 1: post recv ret 0
+Reduce root rank 1: post recv ret 0
+Reduce root send success
+Reduce root receive success
+Reduce root send success
+Reduce root receive success
+Reduce root send success
+Reduce root receive success
+Reduce root send success
+Reduce root receive success
+Reduce operation completed for rank 1
+Reduce (root=1) completed, Time taken: 0.518000 milliseconds
+  [Rank 1] Reduce result verified: PASS (first 3: 0, 3, 6)
 
-First 10 elements:
-  idx 0: in_data=0, dst_data=0, expected=0 ✓
-  idx 1: in_data=2, dst_data=1, expected=3 ✗
+========== Test 4: AllReduce (again) ==========
+Rank 1: Starting AllReduce (again)...
+AllReduce: len=4096, PAYLOAD_COUNT=1024, message_num=4
+AllReduce: Prepared imm_data=0xFFFF1000 (dest=0xFFFF, prim=0, op=1, dtype=0)
+[CTRL] Sending control message with imm_data=0xFFFF1000
+[CTRL] Control message sent successfully
+i: 0, post recv ret 0
+i: 1, post recv ret 0
+i: 2, post recv ret 0
+i: 3, post recv ret 0
+[AllReduce] Starting poll loop: waiting for 4 messages, sent 2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=0, byte_len=4096
+[AllReduce] SEND success for wr_id=0
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=0, byte_len=4096
+[AllReduce] RECV success for wr_id=0
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=1, byte_len=4096
+[AllReduce] SEND success for wr_id=1
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=1, byte_len=4096
+[AllReduce] RECV success for wr_id=1
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=2, byte_len=4096
+[AllReduce] SEND success for wr_id=2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=2, byte_len=4096
+[AllReduce] RECV success for wr_id=2
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=0, wr_id=3, byte_len=4096
+[AllReduce] SEND success for wr_id=3
+[AllReduce] poll_cq returned 1 completions
+[AllReduce] WC[0]: status=0, opcode=128, wr_id=3, byte_len=4096
+[AllReduce] RECV success for wr_id=3
+[AllReduce] Completed: received all 4 messages
+AllReduce (again) completed, Time taken: 0.585000 milliseconds
+  [Rank 1] AllReduce result verified: PASS (first 3: 0, 3, 6)
 
-ERROR: Mismatch detected!
-  ERROR at idx 1: got 1, expected 3
-  idx 2: in_data=4, dst_data=6, expected=6 ✓
-  idx 3: in_data=6, dst_data=9, expected=9 ✓
-  idx 4: in_data=8, dst_data=12, expected=12 ✓
-  idx 5: in_data=10, dst_data=15, expected=15 ✓
-  idx 6: in_data=12, dst_data=18, expected=18 ✓
-  idx 7: in_data=14, dst_data=21, expected=21 ✓
-  idx 8: in_data=16, dst_data=24, expected=24 ✓
-  idx 9: in_data=18, dst_data=27, expected=27 ✓
+========== Test 5: Broadcast (root=0) ==========
+Rank 1: Starting Broadcast (root=0)...
+Rank 1: Before broadcast, in_data[0..2] = 0, 2, 4
+Broadcast: len=4096, PAYLOAD_COUNT=1024, message_num=4
+Rank 1: Non-root, waiting to receive broadcast from root 0
+Broadcast non-root rank 1: post recv ret 0
+Broadcast non-root rank 1: post recv ret 0
+Broadcast non-root rank 1: post recv ret 0
+Broadcast non-root rank 1: post recv ret 0
+Broadcast non-root rank 1 receive success
+Broadcast non-root rank 1 receive success
+Broadcast non-root rank 1 receive success
+Broadcast non-root rank 1 receive success
+Broadcast operation completed for rank 1
+Broadcast (root=0) completed, Time taken: 0.368000 milliseconds
+Rank 1: After broadcast, in_data[0..2] = 0, 1, 2
+  [Rank 1] Broadcast result verified: PASS (first 3: 0, 1, 2)
 
-FAILED: Result verification failed!
+========== Test 6: Broadcast (root=1) ==========
+Rank 1: Starting Broadcast (root=1)...
+Rank 1: Before broadcast, in_data[0..2] = 0, 2, 4
+Broadcast: len=4096, PAYLOAD_COUNT=1024, message_num=4
+Rank 1: Prepared imm_data=0x00019000 (dest=1, prim=2, op=1, dtype=0)
+[CTRL] Sending control message with imm_data=0x00019000
+[CTRL] Control message sent successfully
+Broadcast root rank 1 send success
+Broadcast root rank 1 send success
+Broadcast root rank 1 send success
+Broadcast root rank 1 send success
+Broadcast operation completed for rank 1
+Broadcast (root=1) completed, Time taken: 0.379000 milliseconds
+Rank 1: After broadcast, in_data[0..2] = 0, 2, 4
+  [Rank 1] Broadcast result verified: PASS (first 3: 0, 2, 4)
 
-=== Test Summary ===
-Operation: AllReduce
-World size: 2
-Current rank: 1
-Data count: 4096 elements
-====================
-
-Rank 1: Test completed.
+========================================
+       Multi-Operation Test Summary
+========================================
+Rank: 1
+Tests passed: 6
+Tests failed: 0
+Overall: ALL PASSED
+========================================

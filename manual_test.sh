@@ -10,17 +10,17 @@ sleep 2
 
 echo ""
 echo "=== Step 2: Starting Switch ==="
-ssh switch "cd /root && ./switch > /root/switch.log" &
+ssh switch "cd /root && ./switch_v2 > /root/switch.log" &
 sleep 2
 
 echo ""
 echo "=== Step 3: Starting VM1 (rank 0) ==="
-ssh vm1 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host 2 192.168.0.6 0 0 > /root/vm1.log" &
+ssh vm1 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host_multi_ops 2 192.168.0.6 0 > /root/vm1.log" &
 sleep 2
 
 echo ""
 echo "=== Step 4: Starting VM2 (rank 1) ==="
-ssh vm2 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host 2 192.168.0.6 1 0 > /root/vm2.log" &
+ssh vm2 "cd /root && export CONTROLLER_IP='192.168.0.3' && ./host_multi_ops 2 192.168.0.6 1 > /root/vm2.log" &
 
 echo ""
 echo "=== Waiting for completion (30 seconds) ==="

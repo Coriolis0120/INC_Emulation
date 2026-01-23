@@ -10,6 +10,7 @@
 
 // 拓扑相关
 #define MAX_RANKS 128
+#define MAX_WORLD_SIZE 128    // 最大 world_size (用于规则表)
 
 // Rule 相关
 #define MAX_RULES 100

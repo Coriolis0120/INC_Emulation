@@ -21,7 +21,7 @@ static void init_psn_state(psn_state_t *state) {
     state->agg_buffer.len = 0;
     state->agg_buffer.psn = -1;
     state->agg_buffer.packet_type = 0;
-    state->agg_buffer.operation_type = OPERATION_TYPE_NULL;
+    state->agg_buffer.operation_type = PRIMITIVE_TYPE_NULL;
     state->agg_buffer.root_rank = -1;
     memset(state->agg_buffer.buffer, 0, sizeof(state->agg_buffer.buffer));
 
@@ -30,7 +30,7 @@ static void init_psn_state(psn_state_t *state) {
     state->bcast_buffer.len = 0;
     state->bcast_buffer.psn = -1;
     state->bcast_buffer.packet_type = 0;
-    state->bcast_buffer.operation_type = OPERATION_TYPE_NULL;
+    state->bcast_buffer.operation_type = PRIMITIVE_TYPE_NULL;
     state->bcast_buffer.root_rank = -1;
     memset(state->bcast_buffer.buffer, 0, sizeof(state->bcast_buffer.buffer));
 
@@ -77,6 +77,7 @@ int switch_context_init(switch_context_t *ctx, int switch_id, int thread_pool_si
     ctx->down_epsn = 0;
     memset(ctx->latest_ack, 0, sizeof(ctx->latest_ack));
     ctx->down_ack = 0;
+    memset(ctx->send_psn, 0, sizeof(ctx->send_psn));  // 初始化发送PSN计数器
 
     // 初始化路由表
     memset(&ctx->routing_table, 0, sizeof(ctx->routing_table));
@@ -84,8 +85,9 @@ int switch_context_init(switch_context_t *ctx, int switch_id, int thread_pool_si
     memset(ctx->rank_to_conn, -1, sizeof(ctx->rank_to_conn));
 
     // 初始化元数据
-    ctx->operation_type = OPERATION_TYPE_ALLREDUCE;
+    ctx->operation_type = PRIMITIVE_TYPE_ALLREDUCE;
     ctx->root_rank = -1;
+    ctx->ctrl_psn = -1;  // 初始化为 -1，表示还没有收到控制消息
     pthread_mutex_init(&ctx->meta_mutex, NULL);
 
     // 初始化控制器通信
@@ -189,7 +191,7 @@ void switch_context_reset_psn_states(switch_context_t *ctx) {
 
     // 重置元数据
     pthread_mutex_lock(&ctx->meta_mutex);
-    ctx->operation_type = OPERATION_TYPE_ALLREDUCE;
+    ctx->operation_type = PRIMITIVE_TYPE_ALLREDUCE;
     ctx->root_rank = -1;
     pthread_mutex_unlock(&ctx->meta_mutex);
 
@@ -213,9 +215,23 @@ static const char* get_state_name(switch_state_t state) {
  */
 static const char* get_operation_name(primitive_type_t op) {
     switch (op) {
-        case OPERATION_TYPE_ALLREDUCE: return "ALLREDUCE";
-        case OPERATION_TYPE_REDUCE: return "REDUCE";
-        case OPERATION_TYPE_BROADCAST: return "BROADCAST";
+        case PRIMITIVE_TYPE_NULL: return "NULL";
+        case PRIMITIVE_TYPE_ALLREDUCE: return "ALLREDUCE";
+        case PRIMITIVE_TYPE_REDUCE: return "REDUCE";
+        case PRIMITIVE_TYPE_BROADCAST: return "BROADCAST";
+        default: return "UNKNOWN";
+    }
+}
+
+/**
+ * @brief 获取原语类型名称字符串
+ */
+static const char* get_primitive_name(primitive_type_t prim) {
+    switch (prim) {
+        case PRIMITIVE_TYPE_NULL: return "NULL";
+        case PRIMITIVE_TYPE_ALLREDUCE: return "ALLREDUCE";
+        case PRIMITIVE_TYPE_REDUCE: return "REDUCE";
+        case PRIMITIVE_TYPE_BROADCAST: return "BROADCAST";
         default: return "UNKNOWN";
     }
 }
@@ -282,10 +298,14 @@ void switch_context_print(switch_context_t *ctx) {
     for (int i = 0; i < ctx->routing_table.count && i < 5; i++) {
         rule_t *rule = &ctx->routing_table.rules[i];
         printf("  Rule[%d]:\n", i);
-        printf("    Src IP:  0x%08x\n", rule->src_ip);
-        printf("    Dst IP:  0x%08x\n", rule->dst_ip);
-        printf("    Dir:     %s\n", rule->direction == DIR_UP ? "UP" : "DOWN");
-        printf("    Out Cnt: %d\n", rule->out_conns_cnt);
+        printf("    Src IP:     0x%08x\n", rule->src_ip);
+        printf("    Dst IP:     0x%08x\n", rule->dst_ip);
+        printf("    Primitive:  %s (%d)\n", get_primitive_name(rule->primitive), rule->primitive);
+        printf("    Param:      %d\n", rule->primitive_param);
+        printf("    Direction:  %s\n", rule->direction == DIR_UP ? "UP" : "DOWN");
+        printf("    Root:       %s\n", rule->root ? "Yes" : "No");
+        printf("    Conn ID:    %d\n", rule->conn_id);
+        printf("    Out Cnt:    %d\n", rule->out_conns_cnt);
     }
     if (ctx->routing_table.count > 5) {
         printf("  ... (%d more rules)\n", ctx->routing_table.count - 5);
@@ -307,89 +327,4 @@ void switch_context_print(switch_context_t *ctx) {
 
     printf("========================================\n");
     printf("\n");
-}
-
-/**
- * @brief 将交换机上下文导出为YAML格式
- */
-int switch_context_export_yaml(switch_context_t *ctx, const char *filename) {
-    if (!ctx || !filename) {
-        fprintf(stderr, "Invalid parameters for YAML export\n");
-        return -1;
-    }
-
-    FILE *fp = fopen(filename, "w");
-    if (!fp) {
-        perror("Failed to open file for YAML export");
-        return -1;
-    }
-
-    fprintf(fp, "# Switch Context Export\n");
-    fprintf(fp, "# Generated automatically\n");
-    fprintf(fp, "\n");
-
-    // 基本信息
-    fprintf(fp, "basic_info:\n");
-    fprintf(fp, "  switch_id: %d\n", ctx->switch_id);
-    fprintf(fp, "  state: %s\n", get_state_name(ctx->state));
-    fprintf(fp, "  is_root: %s\n", ctx->is_root ? "true" : "false");
-    fprintf(fp, "  controller_fd: %d\n", ctx->controller_fd);
-    fprintf(fp, "\n");
-
-    // 连接信息
-    fprintf(fp, "connections:\n");
-    fprintf(fp, "  fan_in: %d\n", ctx->fan_in);
-    fprintf(fp, "  num_receivers: %d\n", ctx->num_receivers);
-    fprintf(fp, "\n");
-
-    // 元数据
-    fprintf(fp, "metadata:\n");
-    fprintf(fp, "  operation_type: %s\n", get_operation_name(ctx->operation_type));
-    fprintf(fp, "  root_rank: %d\n", ctx->root_rank);
-    fprintf(fp, "\n");
-
-    // PSN 管理
-    fprintf(fp, "psn_management:\n");
-    fprintf(fp, "  uplink_expected_psn:\n");
-    for (int i = 0; i < ctx->fan_in; i++) {
-        fprintf(fp, "    - conn_%d: %d\n", i, ctx->agg_epsn[i]);
-    }
-    fprintf(fp, "  downlink_expected_psn: %d\n", ctx->down_epsn);
-    fprintf(fp, "  uplink_latest_ack:\n");
-    for (int i = 0; i < ctx->fan_in; i++) {
-        fprintf(fp, "    - conn_%d: %d\n", i, ctx->latest_ack[i]);
-    }
-    fprintf(fp, "  downlink_latest_ack: %d\n", ctx->down_ack);
-    fprintf(fp, "\n");
-
-    // 路由表
-    fprintf(fp, "routing_table:\n");
-    fprintf(fp, "  rule_count: %d\n", ctx->routing_table.count);
-    fprintf(fp, "  rules:\n");
-    for (int i = 0; i < ctx->routing_table.count; i++) {
-        rule_t *rule = &ctx->routing_table.rules[i];
-        fprintf(fp, "    - id: %d\n", i);
-        fprintf(fp, "      src_ip: 0x%08x\n", rule->src_ip);
-        fprintf(fp, "      dst_ip: 0x%08x\n", rule->dst_ip);
-        fprintf(fp, "      direction: %s\n", rule->direction == DIR_UP ? "UP" : "DOWN");
-        fprintf(fp, "      out_conns_count: %d\n", rule->out_conns_cnt);
-    }
-    fprintf(fp, "\n");
-
-    // PSN 状态统计
-    int active_psn = 0;
-    for (int i = 0; i < SWITCH_ARRAY_LENGTH; i++) {
-        if (ctx->psn_states[i].agg_buffer.state != 0 ||
-            ctx->psn_states[i].bcast_buffer.state != 0) {
-            active_psn++;
-        }
-    }
-    fprintf(fp, "psn_states:\n");
-    fprintf(fp, "  total_slots: %d\n", SWITCH_ARRAY_LENGTH);
-    fprintf(fp, "  active_count: %d\n", active_psn);
-    fprintf(fp, "\n");
-
-    fclose(fp);
-    printf("Context exported to: %s\n", filename);
-    return 0;
 }

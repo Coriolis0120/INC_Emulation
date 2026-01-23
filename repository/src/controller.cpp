@@ -5,7 +5,82 @@ switch_info switch_topology[TOPOLOGY_SIZE];
 int controller_group::group_num = 0;
 int controller_communicator::communicator_num = 10;
 
+// 控制器指令定义
+#define CMD_STALL 1
+#define CMD_RESET 2
+#define CMD_RESET_PSN 3
+#define CMD_SET_CONNECTIONS 4
+#define CMD_START 5
 
+/**
+ * @brief 发送单字节命令到交换机
+ */
+static int send_command(int fd, uint8_t cmd) {
+    if (send(fd, &cmd, sizeof(cmd), 0) != sizeof(cmd)) {
+        perror("[Controller] Failed to send command");
+        return -1;
+    }
+    return 0;
+}
+
+/**
+ * @brief 发送 YAML 配置到交换机（简化协议）
+ *
+ * 协议: 4字节长度(网络字节序) + YAML内容
+ */
+static int send_yaml_to_switch(int fd, const std::string& yaml_content) {
+    // 1. 发送 YAML 长度 (网络字节序)
+    uint32_t yaml_size = htonl(yaml_content.size());
+    if (send(fd, &yaml_size, sizeof(yaml_size), 0) != sizeof(yaml_size)) {
+        perror("[Controller] Failed to send YAML size");
+        return -1;
+    }
+
+    // 3. 发送 YAML 内容
+    size_t total_sent = 0;
+    while (total_sent < yaml_content.size()) {
+        ssize_t sent = send(fd, yaml_content.c_str() + total_sent,
+                           yaml_content.size() - total_sent, 0);
+        if (sent <= 0) {
+            perror("[Controller] Failed to send YAML content");
+            return -1;
+        }
+        total_sent += sent;
+    }
+
+    printf("[Controller] YAML sent to fd %d successfully (%zu bytes)\n", fd, yaml_content.size());
+    return 0;
+}
+
+/**
+ * @brief 发送 START 命令到交换机
+ */
+static int send_start_command(int fd) {
+    return send_command(fd, CMD_START);
+}
+
+/**
+ * @brief 发送 RESET 命令到交换机
+ */
+static int send_reset_command(int fd) {
+    return send_command(fd, CMD_RESET);
+}
+
+/**
+ * @brief 发送 RESET_PSN 命令到交换机
+ */
+static int send_reset_psn_command(int fd) {
+    return send_command(fd, CMD_RESET_PSN);
+}
+
+/**
+ * @brief 发送 STALL 命令到交换机
+ */
+static int send_stall_command(int fd) {
+    return send_command(fd, CMD_STALL);
+}
+
+// 保留旧的文件发送函数用于向 rank0 发送拓扑
 static void send_file_with_length(int fd, const char *file_path) {
     // 打开文件并获取大小
     FILE *file = fopen(file_path, "rb");
@@ -68,15 +143,26 @@ static void group_session(int client_fd) {
     char req_type;
     ssize_t bytes;
     char buffer[4096];
-    controller_group *group;
-    int world_size;
+    controller_group *group = nullptr;
+    int world_size = 0;
     std::vector<controller_communicator *> comms;
     // 持续处理来自同一 rank0 的控制请求：先建立 group，再可能建立多个 communicator
     while (true) {
         // 读取 1 字节请求类型（'G'：创建组；'C'：创建通信器并分发路由）
-        
+
         bytes = recv(client_fd, &req_type, 1, MSG_WAITALL);
-        printf("begin to recv from rank0.\n");
+
+        // 检查连接是否关闭或出错
+        if (bytes <= 0) {
+            if (bytes == 0) {
+                printf("[Controller] Client disconnected normally.\n");
+            } else {
+                perror("[Controller] recv error");
+            }
+            break;  // 退出循环，结束会话
+        }
+
+        printf("begin to recv from rank0, req_type='%c'\n", req_type);
         if(req_type == 'G'){
             printf("recv the group creation request.\n");
             // 组控制：收集 world_size 和各节点 IP，分配 group id 返回给 rank0
@@ -106,22 +192,36 @@ static void group_session(int client_fd) {
                 printf("recv the qp num %d.\n",comm->qp_list[i]);
             }
             printf("all qp nums received.\n");
-            // 计算路由并生成 YAML（/home/ubuntu/topology.yaml）
+            // 计算路由并生成 YAML（/root/topology.yaml）
             comm->calculate_route(switch_topology);
             printf("route_calculated\n");
-            // 先向所有交换机发送其 id，作为后续 YAML 文件的上下文
-            for(int i=0;i<TOPOLOGY_SIZE;++i){
-                send(switch_topology[i].fd, &i, 4, 0);
-            }
 
-            printf("send id to switches.\n");
-
-            // 下发路由文件到所有交换机
+            // 使用新协议：为每个交换机生成并发送其专属的 YAML 配置
+            printf("[Controller] Sending YAML configurations to switches...\n");
             for (int i = 0; i < TOPOLOGY_SIZE; ++i) {
                 int fd = switch_topology[i].fd;
-                send_file_with_length(fd, "/root/topology.yaml");
+                if (fd < 0) {
+                    fprintf(stderr, "[Controller] Switch %d not connected, skipping\n", i);
+                    continue;
+                }
+
+                // 生成该交换机的专属 YAML 配置
+                std::string yaml_content = comm->generate_yaml_for_switch(i);
+                if (yaml_content.empty()) {
+                    fprintf(stderr, "[Controller] Failed to generate YAML for switch %d\n", i);
+                    continue;
+                }
+
+                printf("[Controller] Sending YAML to switch %d (%zu bytes):\n%s\n",
+                       i, yaml_content.size(), yaml_content.c_str());
+
+                // 发送 YAML 配置
+                if (send_yaml_to_switch(fd, yaml_content) < 0) {
+                    fprintf(stderr, "[Controller] Failed to send YAML to switch %d\n", i);
+                }
             }
-            
+            printf("[Controller] YAML configurations sent to all switches\n");
+
             // 同步将路由文件传给 rank0，让其感知拓扑
             send_file_with_length(client_fd, "/root/topology.yaml");
         }else if(req_type == 'R'){

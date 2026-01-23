@@ -72,7 +72,14 @@ int get_switch_info(const char* yaml_file, int rank, uint32_t *ip, uint32_t *qpn
     for (const auto& sw : config["switches"]) {
         for (const auto& conn : sw["connections"]) {
 
-            if(conn["host_id"].as<int>() == rank) {
+            // 兼容新旧格式：优先使用 peer_id，回退到 host_id
+            int conn_peer_id = -1;
+            if (conn["peer_id"]) {
+                conn_peer_id = conn["peer_id"].as<int>();
+            } else if (conn["host_id"]) {
+                conn_peer_id = conn["host_id"].as<int>();
+            }
+            if(conn_peer_id == rank) {
                 *ip = get_ip(conn["my_ip"].as<std::string>().c_str());
                 *qpnum = conn["my_qp"].as<unsigned int>();
                 return 0;
