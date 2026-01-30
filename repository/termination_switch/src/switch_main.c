@@ -132,17 +132,20 @@ static int pkt_queue_push(packet_queue_t *q, queued_packet_t *pkt) {
  */
 static int pkt_queue_pop(packet_queue_t *q, queued_packet_t *pkt) {
     unsigned int tail = q->tail;
-    MEMORY_BARRIER();
-    unsigned int head = *(volatile unsigned int *)&q->head;  // volatile 读取确保不被缓存
+    __sync_synchronize();  // 确保读取最新的 head
+    unsigned int head = *(volatile unsigned int *)&q->head;
 
     if (tail == head) {
         // 队列空
         return 0;
     }
 
+    // 确保 head 更新可见后再读取数据
+    __sync_synchronize();
     memcpy(pkt, &q->packets[tail], sizeof(queued_packet_t));
-    MEMORY_BARRIER();
-    q->tail = (tail + 1) & (PKT_QUEUE_SIZE - 1);
+    // 确保数据完全读取后再更新 tail
+    __sync_synchronize();
+    *(volatile unsigned int *)&q->tail = (tail + 1) & (PKT_QUEUE_SIZE - 1);
     return 1;
 }
 
@@ -190,16 +193,17 @@ static int send_queue_push(send_queue_t *q, send_packet_t *pkt) {
  */
 static int send_queue_pop(send_queue_t *q, send_packet_t *pkt) {
     unsigned int tail = q->tail;
-    MEMORY_BARRIER();
-    unsigned int head = *(volatile unsigned int *)&q->head;  // volatile 读取确保不被缓存
+    __sync_synchronize();
+    unsigned int head = *(volatile unsigned int *)&q->head;
 
     if (tail == head) {
         return 0;
     }
 
+    __sync_synchronize();
     memcpy(pkt, &q->packets[tail], sizeof(send_packet_t));
-    MEMORY_BARRIER();
-    q->tail = (tail + 1) & (SEND_QUEUE_SIZE - 1);
+    __sync_synchronize();
+    *(volatile unsigned int *)&q->tail = (tail + 1) & (SEND_QUEUE_SIZE - 1);
     return 1;
 }
 

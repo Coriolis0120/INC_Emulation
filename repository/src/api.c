@@ -1,5 +1,6 @@
 #include "api.h"
 #include <sys/time.h>
+#include <sched.h>
 
 // 带时间戳的调试打印宏（改为普通 printf）
 #define TS_PRINT(...) printf(__VA_ARGS__)
@@ -570,6 +571,7 @@ static int send_control_message(struct inccl_communicator *comm, uint32_t imm_da
     int poll_result;
     do {
         poll_result = ibv_poll_cq(comm->cq, 1, &wc);
+        if (poll_result == 0) sched_yield();  // 让出 CPU，避免忙等待
     } while (poll_result == 0);
 
     if (poll_result < 0 || wc.status != IBV_WC_SUCCESS) {
