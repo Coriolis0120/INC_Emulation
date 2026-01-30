@@ -1,0 +1,119 @@
+#include "api.h"
+#include "util.h"
+#include <assert.h>
+#include <time.h>
+#include <stdlib.h>
+#include <string.h>
+
+// 动态分配的数据缓冲区
+int32_t *in_data = NULL;
+int32_t *dst_data = NULL;
+int data_count = 0;
+
+clock_t start_time;
+
+void print_cost_time(const char *prefix) {
+    clock_t end = clock();
+    double elapsed_time = (double)(end - start_time) / CLOCKS_PER_SEC;
+    printf("%s, Time: %.3f ms\n", prefix, elapsed_time * 1000);
+    fflush(stdout);
+}
+
+void init_data(int rank) {
+    for(int i = 0; i < data_count; i++) {
+        in_data[i] = i * (rank + 1);
+    }
+}
+
+void clear_dst_data() {
+    memset(dst_data, 0, data_count * sizeof(int32_t));
+}
+
+int verify_allreduce(int world_size) {
+    int expected_multiplier = 0;
+    for(int r = 0; r < world_size; r++) {
+        expected_multiplier += (r + 1);
+    }
+
+    int errors = 0;
+    for(int i = 0; i < data_count && errors < 5; i++) {
+        int expected = i * expected_multiplier;
+        if(dst_data[i] != expected) {
+            printf("  ERROR idx %d: got %d, expected %d\n", i, dst_data[i], expected);
+            errors++;
+        }
+    }
+    return errors == 0;
+}
+
+int main(int argc, char *argv[]) {
+    if(argc != 5) {
+        printf("Usage: %s <world_size> <master_addr> <rank> <data_count>\n", argv[0]);
+        printf("Example: %s 2 192.168.0.6 0 8192\n", argv[0]);
+        return -1;
+    }
+
+    int world_size = atoi(argv[1]);
+    char *master_addr = argv[2];
+    int rank = atoi(argv[3]);
+    data_count = atoi(argv[4]);
+
+    printf("=== Simple AllReduce Test ===\n");
+    printf("world_size: %d, rank: %d\n", world_size, rank);
+    printf("data_count: %d (%d KB)\n", data_count, data_count * 4 / 1024);
+    printf("=============================\n\n");
+    fflush(stdout);
+
+    // 分配内存
+    in_data = (int32_t *)malloc(data_count * sizeof(int32_t));
+    dst_data = (int32_t *)malloc(data_count * sizeof(int32_t));
+    if(!in_data || !dst_data) {
+        printf("ERROR: Failed to allocate memory\n");
+        return -1;
+    }
+
+    // 初始化数据
+    init_data(rank);
+    clear_dst_data();
+
+    // 创建通信组和通信器
+    printf("Rank %d: Creating group...\n", rank);
+    fflush(stdout);
+    struct inccl_group *group = inccl_group_create(world_size, rank, master_addr);
+    if(!group) {
+        printf("ERROR: Failed to create group\n");
+        return -1;
+    }
+
+    printf("Rank %d: Creating communicator...\n", rank);
+    fflush(stdout);
+    struct inccl_communicator *comm = inccl_communicator_create(group, data_count * 4);
+    if(!comm) {
+        printf("ERROR: Failed to create communicator\n");
+        return -1;
+    }
+
+    // 执行AllReduce测试
+    printf("\n=== AllReduce Test ===\n");
+    fflush(stdout);
+
+    start_time = clock();
+    inccl_allreduce_sendrecv(comm, in_data, data_count, dst_data);
+    print_cost_time("AllReduce completed");
+
+    // 验证结果
+    if(verify_allreduce(world_size)) {
+        printf("  PASS: AllReduce verified (first 3: %d, %d, %d)\n",
+               dst_data[0], dst_data[1], dst_data[2]);
+    } else {
+        printf("  FAIL: AllReduce verification failed\n");
+    }
+    fflush(stdout);
+
+    printf("\n=== Test Complete ===\n");
+    fflush(stdout);
+
+    free(in_data);
+    free(dst_data);
+    return 0;
+}
