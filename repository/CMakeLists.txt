@@ -11,7 +11,7 @@ set(CMAKE_EXE_LINKER_FLAGS "-static-libgcc -static-libstdc++")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
-include_directories(include third_party/C-Thread-Pool termination_switch/include)
+include_directories(include third_party/C-Thread-Pool termination_switch/src/include)
 
 set(COMMON_SRCS
     src/api.c

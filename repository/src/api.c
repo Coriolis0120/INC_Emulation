@@ -1,4 +1,8 @@
 #include "api.h"
+#include <sys/time.h>
+
+// 带时间戳的调试打印宏（改为普通 printf）
+#define TS_PRINT(...) printf(__VA_ARGS__)
 
 // 超时配置（单位：微秒）
 #define POLL_TIMEOUT_US 300000000  // 300秒（5分钟）总超时
@@ -685,7 +689,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
     // PAYLOAD_COUNT: 一个payload的元素大小（int32_t数量）
     // message_num: 总消息有多少个payload
 
-    printf("[AllReduce] Starting poll loop: waiting for %d messages, sent %d\n", message_num, send_num);
+    TS_PRINT("[AllReduce] Starting poll loop: waiting for %d messages, sent %d\n", message_num, send_num);
     fflush(stdout);
 
     int poll_count = 0;  // 轮询计数器
@@ -703,7 +707,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
                               (current_time.tv_usec - start_time.tv_usec);
 
         if(elapsed_us > POLL_TIMEOUT_US) {
-            printf("[AllReduce] TIMEOUT after %lu us! receive_num=%d/%d, send_num=%d\n",
+            TS_PRINT("[AllReduce] TIMEOUT after %lu us! receive_num=%d/%d, send_num=%d\n",
                    elapsed_us, receive_num, message_num, send_num);
             fflush(stdout);
             free(wc);
@@ -711,7 +715,7 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
         }
 
         if(elapsed_us - last_warn_time > POLL_WARN_INTERVAL) {
-            printf("[AllReduce] Warning: waiting for %lu us, receive_num=%d/%d\n",
+            TS_PRINT("[AllReduce] Warning: waiting for %lu us, receive_num=%d/%d\n",
                    elapsed_us, receive_num, message_num);
             fflush(stdout);
             last_warn_time = elapsed_us;
@@ -720,18 +724,18 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
         // 轮询完成队列，最多获取message_num个完成事件
         int result = ibv_poll_cq(comm->cq, message_num, wc);
         if(result > 0) {  // 有完成事件
-            printf("[AllReduce] poll_cq returned %d completions\n", result);
+            TS_PRINT("[AllReduce] poll_cq returned %d completions\n", result);
             fflush(stdout);
             // 遍历所有完成事件
             for(int i = 0; i < result; i++){
                 struct ibv_wc *tmp = wc + i;  // 获取当前完成事件
-                printf("[AllReduce] WC[%d]: status=%d, opcode=%d, wr_id=%lu, byte_len=%u\n",
+                TS_PRINT("[AllReduce] WC[%d]: status=%d, opcode=%d, wr_id=%lu, byte_len=%u\n",
                        i, tmp->status, tmp->opcode, tmp->wr_id, tmp->byte_len);
                 fflush(stdout);
 
                 // 处理接收完成事件（包括 IBV_WC_RECV 和 IBV_WC_RECV_RDMA_WITH_IMM）
                 if(tmp->status==IBV_WC_SUCCESS && (tmp->opcode==IBV_WC_RECV || tmp->opcode==IBV_WC_RECV_RDMA_WITH_IMM)) {
-                    printf("[AllReduce] RECV success for wr_id=%lu\n", tmp->wr_id);
+                    TS_PRINT("[AllReduce] RECV success for wr_id=%lu\n", tmp->wr_id);
                     fflush(stdout);
                     uint64_t idx = tmp->wr_id;  // 消息索引
                     int slot = idx % window_size;  // 缓冲区槽位
@@ -770,8 +774,18 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
 
                     // 滑动窗口：接收一个就发送下一个（如果还有未发送的）
                     if(send_num < message_num) {
-                        // 直接发送已准备好的缓冲区（使用模运算实现滑动窗口）
+                        // 动态准备数据到滑动窗口槽位
                         int send_slot = send_num % window_size;
+                        int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                        for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                            int src_idx = send_num * PAYLOAD_COUNT + j;
+                            if(src_idx < (int)len) {
+                                msg_buffer[j] = htonl(src_data[src_idx]);
+                            } else {
+                                msg_buffer[j] = 0;
+                            }
+                        }
+
                         memset(&send_sge, 0, sizeof(send_sge));
                         send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                         send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -790,11 +804,11 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
                     }
                 } else if(tmp->status==IBV_WC_SUCCESS) {
                     // 处理发送完成事件
-                    printf("[AllReduce] SEND success for wr_id=%lu\n", tmp->wr_id);
+                    TS_PRINT("[AllReduce] SEND success for wr_id=%lu\n", tmp->wr_id);
                     fflush(stdout);
                 } else {
                     // 处理错误情况
-                    printf("[AllReduce] ERROR: wc status=%d, opcode=%d, wr_id=%lu, vendor_err=%u\n",
+                    TS_PRINT("[AllReduce] ERROR: wc status=%d, opcode=%d, wr_id=%lu, vendor_err=%u\n",
                            tmp->status, tmp->opcode, tmp->wr_id, tmp->vendor_err);
                     fflush(stdout);
                     free(wc);
@@ -804,13 +818,13 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
             }
         }else if(result < 0) {
             // 处理轮询错误
-            printf("[AllReduce] ibv_poll_cq error: %d\n", result);
+            TS_PRINT("[AllReduce] ibv_poll_cq error: %d\n", result);
             fflush(stdout);
             free(wc);
             return;
         }
     }
-    printf("[AllReduce] Completed: received all %d messages\n", message_num);
+    TS_PRINT("[AllReduce] Completed: received all %d messages\n", message_num);
     fflush(stdout);
     free(wc);
 }
@@ -1107,7 +1121,18 @@ void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, u
 
                         // 滑动窗口：发送下一个消息
                         if(send_num < message_num) {
+                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
+                            int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                            for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                                int src_idx = send_num * PAYLOAD_COUNT + j;
+                                if(src_idx < (int)len) {
+                                    msg_buffer[j] = htonl(src_data[src_idx]);
+                                } else {
+                                    msg_buffer[j] = 0;
+                                }
+                            }
+
                             memset(&send_sge, 0, sizeof(send_sge));
                             send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -1157,7 +1182,18 @@ void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, u
 
                         // 滑动窗口：发送下一个消息
                         if(send_num < message_num) {
+                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
+                            int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                            for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                                int src_idx = send_num * PAYLOAD_COUNT + j;
+                                if(src_idx < (int)len) {
+                                    msg_buffer[j] = htonl(src_data[src_idx]);
+                                } else {
+                                    msg_buffer[j] = 0;
+                                }
+                            }
+
                             memset(&send_sge, 0, sizeof(send_sge));
                             send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -1348,7 +1384,18 @@ void inccl_reduce_write(struct inccl_communicator *comm, int32_t* src_data, uint
 
                         // 滑动窗口：发送下一个消息
                         if(send_num < message_num) {
+                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
+                            int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                            for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                                int src_idx = send_num * PAYLOAD_COUNT + j;
+                                if(src_idx < (int)len) {
+                                    msg_buffer[j] = htonl(src_data[src_idx]);
+                                } else {
+                                    msg_buffer[j] = 0;
+                                }
+                            }
+
                             memset(&send_sge, 0, sizeof(send_sge));
                             send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -1400,7 +1447,18 @@ void inccl_reduce_write(struct inccl_communicator *comm, int32_t* src_data, uint
 
                         // 滑动窗口：发送下一个消息
                         if(send_num < message_num) {
+                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
+                            int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                            for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                                int src_idx = send_num * PAYLOAD_COUNT + j;
+                                if(src_idx < (int)len) {
+                                    msg_buffer[j] = htonl(src_data[src_idx]);
+                                } else {
+                                    msg_buffer[j] = 0;
+                                }
+                            }
+
                             memset(&send_sge, 0, sizeof(send_sge));
                             send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -1540,7 +1598,18 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
 
                         // 滑动窗口：发送下一个消息
                         if(send_num < message_num) {
+                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
+                            int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                            for(int j = 0; j < PAYLOAD_COUNT; j++) {
+                                int src_idx = send_num * PAYLOAD_COUNT + j;
+                                if(src_idx < (int)len) {
+                                    msg_buffer[j] = htonl(data[src_idx]);
+                                } else {
+                                    msg_buffer[j] = 0;
+                                }
+                            }
+
                             memset(&send_sge, 0, sizeof(send_sge));
                             send_sge.addr = (uintptr_t)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);

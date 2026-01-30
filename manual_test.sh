@@ -103,7 +103,7 @@ echo ""
 echo "=== Waiting for completion ==="
 
 # 轮询检测测试是否完成
-MAX_WAIT=100
+MAX_WAIT=60
 ELAPSED=0
 while [ $ELAPSED -lt $MAX_WAIT ]; do
     sleep 2

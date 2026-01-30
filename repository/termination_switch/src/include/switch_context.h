@@ -9,7 +9,7 @@
 #include "parameter.h"
 
 // ==================== 无锁队列定义 ====================
-#define PKT_QUEUE_SIZE 8192  // 必须是 2 的幂
+#define PKT_QUEUE_SIZE 16384  // 必须是 2 的幂（增大以避免丢包）
 #define SEND_QUEUE_SIZE 16384 // 发送队列大小，必须是 2 的幂
 
 /**
