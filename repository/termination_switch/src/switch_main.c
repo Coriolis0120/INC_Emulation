@@ -31,7 +31,7 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 1
+#define DEBUG_VERBOSE 0
 
 // 重传相关参数
 #define RETRANSMIT_TIMEOUT_US 1000000   // 2s 超时
@@ -326,15 +326,9 @@ static void forwarding(switch_context_t *ctx, rule_t *rule, uint32_t psn, int ty
                            (type == PACKET_TYPE_NAK) ? "NAK" :
                            (type == PACKET_TYPE_DATA) ? "DATA" : "DATA_SINGLE";
 
-    DBG_PRINT("[SW%d] forwarding: type=%s, PSN=%u, len=%d, out_cnt=%d, opcode=0x%02x\n",
-           sw_id, type_str, psn, len, rule->out_conns_cnt, packet_type);
-
-    // 详细调试特定 PSN
-    if (IS_DEBUG_PSN(psn) && (type == PACKET_TYPE_DATA || type == PACKET_TYPE_DATA_SINGLE) && len > 0) {
-        TS_PRINTF("[DEBUG_PSN] [SW%d] forwarding DATA: PSN=%u, data[0..3]=%u, %u, %u, %u\n",
-               sw_id, psn, ntohl(data[0]), ntohl(data[1]), ntohl(data[2]), ntohl(data[3]));
-        fflush(stdout);
-    }
+    TS_PRINTF("[SW%d] forwarding: type=%s, PSN=%u, len=%d, out_cnt=%d\n",
+           sw_id, type_str, psn, len, rule->out_conns_cnt);
+    fflush(stdout);
 
     if (type == PACKET_TYPE_ACK || type == PACKET_TYPE_NAK) {
         // ACK/NAK: 单播到 ack_conn
@@ -380,9 +374,9 @@ static void cache_and_broadcast(switch_context_t *ctx, rule_t *rule, uint32_t ps
     uint32_t bcast_psn = ctx->down_epsn;
     psn_state_t *state = &ctx->psn_states[Idx(bcast_psn)];
 
-    DBG_PRINT("[SW%d] BCAST_START: recv_PSN=%u, bcast_PSN=%u, len=%d, out_cnt=%d\n",
+    TS_PRINTF("[SW%d] BCAST_START: recv_PSN=%u, bcast_PSN=%u, len=%d, out_cnt=%d\n",
            sw_id, psn, bcast_psn, len, rule->out_conns_cnt);
-    PROGRESS_PRINT(bcast_psn, "[SW%d] BCAST_START: PSN=%u\n", sw_id, bcast_psn);
+    fflush(stdout);
 
     // 详细调试特定 PSN
     if (IS_DEBUG_PSN(bcast_psn) && len > 0) {
@@ -558,16 +552,17 @@ static void aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t
     int expected_degree = ctx->is_root ? ctx->fan_in : ctx->host_fan_in;
 
     // 打印聚合后的 degree
-    DBG_PRINT("[SW%d] AGG_DEGREE: %d/%d, PSN=%u\n",
+    TS_PRINTF("[SW%d] AGG_DEGREE: %d/%d, PSN=%u\n",
            sw_id, degree, expected_degree, psn);
+    fflush(stdout);
 
     pthread_mutex_unlock(&state->mutex);
 
     // 检查是否聚合完成
     if (degree == expected_degree) {
-        DBG_PRINT("[SW%d] AGG_COMPLETE: PSN=%u, op=%s, is_root=%d\n",
+        TS_PRINTF("[SW%d] AGG_COMPLETE: PSN=%u, op=%s, is_root=%d\n",
                sw_id, psn, op_str, ctx->is_root);
-        PROGRESS_PRINT(psn, "[SW%d] AGG_COMPLETE: PSN=%u\n", sw_id, psn);
+        fflush(stdout);
 
         if (ctx->is_root) {
             // 根交换机：根据操作类型处理
@@ -771,16 +766,16 @@ static void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr,
         qpkt.is_nak = (ntohl(aeth->syn_msn) >> 29) != 0;
     }
 
-    // 入队（非阻塞，队列满时丢弃）
-    if (!pkt_queue_push(&ctx->pkt_queues[conn_id], &qpkt)) {
-        // 队列满，已在 pkt_queue_push 中计数
-    }
+    // 直接处理数据包（移除队列，避免时序问题）
+    TS_PRINTF("[SW%d] RECV: conn=%d, PSN=%u, opcode=0x%02x\n",
+           ctx->switch_id, conn_id, psn, opcode);
+    fflush(stdout);
+
+    process_packet(ctx, &qpkt);
 }
 
 /**
- * @brief 处理队列中的数据包（在 worker 线程中调用）
- *
- * 这是原来 packet_handler 的处理逻辑，现在移到 worker 线程中执行
+ * @brief 处理数据包（直接在 pcap callback 中调用）
  */
 static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
     int conn_id = pkt->conn_id;
@@ -795,10 +790,6 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
     // 转换源 IP 用于日志
     char src_ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &src_ip_addr, src_ip, sizeof(src_ip));
-
-    // 使用 DBG_PRINT 减少日志输出，避免影响性能
-    DBG_PRINT("[SW%d] RECV: conn=%d, PSN=%u, opcode=0x%02x, from=%s\n",
-           sw_id, conn_id, psn, opcode, src_ip);
 
     // 从上下文获取当前操作类型
     primitive_type_t prim = ctx->operation_type;
@@ -918,45 +909,35 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
 
         if (rule->direction == DIR_DOWN) {
             // 下行数据：缓存并广播
-            DBG_PRINT("[SW%d] DOWN_DATA: PSN=%u, ePSN=%d, len=%d\n", sw_id, psn, ctx->down_epsn, data_len);
-
-            // 详细调试特定 PSN
-            if (IS_DEBUG_PSN(psn) && data_len > 0) {
-                TS_PRINTF("[DEBUG_PSN] [SW%d] DOWN_DATA recv: PSN=%u, data[0..3]=%u, %u, %u, %u\n",
-                       sw_id, psn, ntohl(data[0]), ntohl(data[1]), ntohl(data[2]), ntohl(data[3]));
-                fflush(stdout);
-            }
+            TS_PRINTF("[SW%d] DOWN_DATA: PSN=%u, ePSN=%d, len=%d\n", sw_id, psn, ctx->down_epsn, data_len);
+            fflush(stdout);
 
             if ((int)psn != ctx->down_epsn) {
                 // PSN 不符合期望，直接丢弃（等待超时重传）
-                DBG_PRINT("[SW%d] DOWN_DISCARD: PSN=%u != ePSN=%d, drop\n",
+                TS_PRINTF("[SW%d] DOWN_DISCARD: PSN=%u != ePSN=%d, drop\n",
                        sw_id, psn, ctx->down_epsn);
+                fflush(stdout);
             } else {
-                DBG_PRINT("[SW%d] DOWN_OK: PSN=%u, process\n", sw_id, psn);
-                PROGRESS_PRINT(psn, "[SW%d] DOWN_OK: PSN=%u\n", sw_id, psn);
+                TS_PRINTF("[SW%d] DOWN_OK: PSN=%u, process\n", sw_id, psn);
+                fflush(stdout);
                 forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
                 cache_and_broadcast(ctx, rule, psn, data, data_len, opcode);
             }
         } else {
             // 上行数据：聚合
-            DBG_PRINT("[SW%d] UP_DATA: conn=%d, PSN=%u, ePSN=%d, len=%d\n",
+            TS_PRINTF("[SW%d] UP_DATA: conn=%d, PSN=%u, ePSN=%d, len=%d\n",
                    sw_id, conn_id, psn, ctx->agg_epsn[conn_id], data_len);
-
-            // 详细调试特定 PSN
-            if (IS_DEBUG_PSN(psn) && data_len > 0) {
-                TS_PRINTF("[DEBUG_PSN] [SW%d] UP_DATA recv: conn=%d, PSN=%u, data[0..3]=%u, %u, %u, %u\n",
-                       sw_id, conn_id, psn, ntohl(data[0]), ntohl(data[1]), ntohl(data[2]), ntohl(data[3]));
-                fflush(stdout);
-            }
+            fflush(stdout);
 
             if ((int)psn != ctx->agg_epsn[conn_id]) {
                 // PSN 不符合期望，直接丢弃（等待超时重传）
-                DBG_PRINT("[SW%d] UP_DISCARD: conn=%d, PSN=%u != ePSN=%d, drop\n",
+                TS_PRINTF("[SW%d] UP_DISCARD: conn=%d, PSN=%u != ePSN=%d, drop\n",
                        sw_id, conn_id, psn, ctx->agg_epsn[conn_id]);
+                fflush(stdout);
             } else {
-                DBG_PRINT("[SW%d] UP_OK: conn=%d, PSN=%u, ePSN->%d\n",
+                TS_PRINTF("[SW%d] UP_OK: conn=%d, PSN=%u, ePSN->%d\n",
                        sw_id, conn_id, psn, ctx->agg_epsn[conn_id] + 1);
-                PROGRESS_PRINT(psn, "[SW%d] UP_OK: conn=%d, PSN=%u\n", sw_id, conn_id, psn);
+                fflush(stdout);
                 ctx->agg_epsn[conn_id]++;
                 forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
                 aggregate(ctx, rule, conn_id, psn, data, data_len, opcode);
@@ -1396,18 +1377,8 @@ void *background_receiving(void *arg) {
         }
     }
 
-    // ========== 启动 worker 线程 ==========
+    // ========== worker 线程已移除，直接在 pcap callback 中处理 ==========
     ctx->num_workers = 0;
-    for (int i = 0; i < ctx->fan_in; i++) {
-        int *conn_id = malloc(sizeof(int));
-        *conn_id = i;
-        if (pthread_create(&ctx->worker_threads[i], NULL, worker_thread, conn_id) == 0) {
-            ctx->num_workers++;
-        } else {
-            fprintf(stderr, "[Receiver] Failed to create worker thread %d\n", i);
-            free(conn_id);
-        }
-    }
 
     // ========== 启动接收线程 ==========
     pthread_t threads[MAX_CONNECTIONS_NUM];
