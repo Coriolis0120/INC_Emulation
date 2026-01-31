@@ -1,7 +1,7 @@
 #include "api.h"
 #include "util.h"
 #include <assert.h>
-#include <time.h>
+#include <sys/time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -10,12 +10,20 @@ int32_t *in_data = NULL;
 int32_t *dst_data = NULL;
 int data_count = 0;
 
-clock_t start_time;
+struct timeval start_time;
 
 void print_cost_time(const char *prefix) {
-    clock_t end = clock();
-    double elapsed_time = (double)(end - start_time) / CLOCKS_PER_SEC;
-    printf("%s, Time: %.3f ms\n", prefix, elapsed_time * 1000);
+    struct timeval end;
+    gettimeofday(&end, NULL);
+    double elapsed_ms = (end.tv_sec - start_time.tv_sec) * 1000.0 +
+                        (end.tv_usec - start_time.tv_usec) / 1000.0;
+
+    // 计算吞吐量: data_count 个 int32_t = data_count * 4 字节
+    double data_bytes = data_count * 4.0;
+    double elapsed_sec = elapsed_ms / 1000.0;
+    double throughput_mbps = (data_bytes * 8.0) / (elapsed_sec * 1e6);
+
+    printf("%s, Time: %.3f ms, Throughput: %.2f Mbps\n", prefix, elapsed_ms, throughput_mbps);
     fflush(stdout);
 }
 
@@ -97,7 +105,7 @@ int main(int argc, char *argv[]) {
     printf("\n=== AllReduce Test ===\n");
     fflush(stdout);
 
-    start_time = clock();
+    gettimeofday(&start_time, NULL);
     inccl_allreduce_sendrecv(comm, in_data, data_count, dst_data);
     print_cost_time("AllReduce completed");
 
