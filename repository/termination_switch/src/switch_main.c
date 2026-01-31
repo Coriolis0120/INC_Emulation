@@ -31,7 +31,7 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 1
+#define DEBUG_VERBOSE 0
 
 // 重传相关参数
 #define RETRANSMIT_TIMEOUT_US 500000   // 2s 超时
