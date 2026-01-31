@@ -1121,9 +1121,8 @@ void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, u
                             posted_recv++;
                         }
 
-                        // 滑动窗口：发送下一个消息
+                        // 滑动窗口：接收完成后触发下一次发送
                         if(send_num < message_num) {
-                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
                             int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             for(int j = 0; j < PAYLOAD_COUNT; j++) {
@@ -1145,13 +1144,13 @@ void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, u
                             wr.wr_id = send_num;
                             wr.sg_list = &send_sge;
                             wr.num_sge = 1;
-                            wr.opcode = IBV_WR_SEND;  // 后续消息使用普通 SEND
+                            wr.opcode = IBV_WR_SEND;
                             wr.send_flags = IBV_SEND_SIGNALED;
 
                             ibv_post_send(comm->qp, &wr, &send_bad_wr);
                             send_num++;
                         }
-                    } else if(tmp->status==IBV_WC_SUCCESS) {
+                    } else if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_SEND) {
                         printf("Reduce root send success\n");
                         fflush(stdout);
                     } else {

@@ -1,6 +1,7 @@
 #include "api.h"
 #include "util.h"
 #include <assert.h>
+#include <sys/time.h>
 #include "topo_parser.h"
 
 // 动态分配的数据缓冲区
@@ -8,12 +9,20 @@ int32_t *data = NULL;
 int data_count = 0;
 
 // 记录开始时间
-clock_t start_time;
+struct timeval start_time;
 
 void print_cost_time(const char *prefix) {
-    clock_t end = clock();
-    double elapsed_time = (double)(end - start_time) / CLOCKS_PER_SEC;
-    printf("%s, Time taken: %f milliseconds\n", prefix, elapsed_time * 1000);
+    struct timeval end;
+    gettimeofday(&end, NULL);
+    double elapsed_ms = (end.tv_sec - start_time.tv_sec) * 1000.0 +
+                        (end.tv_usec - start_time.tv_usec) / 1000.0;
+
+    double data_bytes = data_count * 4.0;
+    double elapsed_sec = elapsed_ms / 1000.0;
+    double throughput_mbps = (data_bytes * 8.0) / (elapsed_sec * 1e6);
+
+    printf("%s, Time: %.3f ms, Throughput: %.2f Mbps\n", prefix, elapsed_ms, throughput_mbps);
+    fflush(stdout);
 }
 
 // Root 节点初始化数据
@@ -73,7 +82,7 @@ int main(int argc, char *argv[]) {
     printf("Rank %d: Starting Broadcast operation...\n", rank);
     fflush(stdout);
 
-    start_time = clock();
+    gettimeofday(&start_time, NULL);
 
     // 执行 Broadcast 操作
     inccl_broadcast_sendrecv(comm, data, data_count, root_rank);

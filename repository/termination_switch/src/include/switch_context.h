@@ -143,6 +143,7 @@ typedef struct {
     primitive_type_t operation_type; // 替代 current_operation_type
     int root_rank;                   // 替代 current_root_rank
     int ctrl_psn;                    // 当前操作的控制消息 PSN（用于计算相对 PSN）
+    int ctrl_forwarded;              // 控制包是否已转发给父交换机（0=未转发，1=已转发）
     pthread_mutex_t meta_mutex;      // 保护元数据访问
     
     // === 资源 ===

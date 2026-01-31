@@ -1,27 +1,34 @@
 #include "api.h"
 #include "util.h"
 #include <assert.h>
+#include <sys/time.h>
 #include "topo_parser.h"
-// 引入 INC 通信接口定义。
-// 通用工具函数与类型定义。
-// 断言用于结果校验。
-// 拓扑解析相关定义（组建集群所需）。
 
 // 动态分配的数据缓冲区
 int32_t *in_data = NULL;
 int32_t *dst_data = NULL;
 int data_count = 0;
 
-// 记录开始时间，用于计算耗时。
-clock_t start_time;
+// 记录开始时间
+struct timeval start_time;
 
-// 打印以毫秒为单位的耗时信息。
-void print_cost_time(const char * prefix) {
-    clock_t end = clock();
+// 打印耗时和吞吐量
+void print_cost_time(const char *prefix, int rank) {
+    struct timeval end;
+    gettimeofday(&end, NULL);
+    double elapsed_ms = (end.tv_sec - start_time.tv_sec) * 1000.0 +
+                        (end.tv_usec - start_time.tv_usec) / 1000.0;
 
-    // 将时钟差转换为秒，再转毫秒。
-    double elapsed_time = (double)(end - start_time) / CLOCKS_PER_SEC;
-    printf("%s, Time taken: %f milliseconds\n", prefix, elapsed_time * 1000);
+    double data_bytes = data_count * 4.0;
+    double elapsed_sec = elapsed_ms / 1000.0;
+    double throughput_mbps = (data_bytes * 8.0) / (elapsed_sec * 1e6);
+
+    printf("\n=== Performance Results (Rank %d) ===\n", rank);
+    printf("Data size: %.2f MB (%d elements)\n", data_bytes / (1024.0 * 1024.0), data_count);
+    printf("Time: %.3f ms (%.3f s)\n", elapsed_ms, elapsed_sec);
+    printf("Throughput: %.2f Mbps (%.2f MB/s)\n", throughput_mbps, throughput_mbps / 8.0);
+    printf("=====================================\n");
+    fflush(stdout);
 }
 
 // 根据 rank 初始化输入数据，便于聚合后验证结果。
@@ -86,13 +93,13 @@ int main(int argc, char *argv[]) {
     fflush(stdout);
 
     // 记录开始时间。
-    start_time = clock();
+    gettimeofday(&start_time, NULL);
 
     // 执行 Reduce 操作
     inccl_reduce_sendrecv(comm, in_data, data_count, dst_data, root_rank);
 
-    // 打印耗时。
-    print_cost_time("Reduce operation completed");
+    // 打印耗时和吞吐量
+    print_cost_time("Reduce", rank);
     
     // 验证结果
     if(rank == root_rank) {

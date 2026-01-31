@@ -95,6 +95,7 @@ int switch_context_init(switch_context_t *ctx, int switch_id, int thread_pool_si
     ctx->operation_type = PRIMITIVE_TYPE_ALLREDUCE;
     ctx->root_rank = -1;
     ctx->ctrl_psn = -1;  // 初始化为 -1，表示还没有收到控制消息
+    ctx->ctrl_forwarded = 0;  // 初始化为 0，表示控制包未转发
     pthread_mutex_init(&ctx->meta_mutex, NULL);
 
     // 初始化控制器通信

@@ -31,10 +31,10 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 0
+#define DEBUG_VERBOSE 1
 
 // 重传相关参数
-#define RETRANSMIT_TIMEOUT_US 1000000   // 2s 超时
+#define RETRANSMIT_TIMEOUT_US 500000   // 2s 超时
 #define RETRANSMIT_CHECK_INTERVAL_US 50000  // 50ms 检查间隔
 #define MAX_RETRANSMIT_BATCH 64  // 每批最多重传的数据包数量
 
@@ -281,16 +281,9 @@ static int send_packet(connection_t *conn, int type, uint32_t *data, int len, ui
  * 与 send_packet 不同，此函数不直接发送，而是将帧入队
  * 由专用的 sender_thread 负责实际发送
  */
-static int send_packet_async(connection_t *conn, int type, uint32_t *data, int len, uint32_t psn, int packet_type) {
+static int send_packet_async_with_imm(connection_t *conn, int type, uint32_t *data, int len, uint32_t psn, int packet_type, uint32_t *imm_data) {
     switch_context_t *ctx = &g_switch_ctx;
     int device_id = conn->device_id;
-
-    // 详细调试特定 PSN
-    if (IS_DEBUG_PSN(psn) && type == PACKET_TYPE_DATA && len > 0) {
-        TS_PRINTF("[DEBUG_PSN] [SW%d] send_packet_async: PSN=%u, len=%d, data[0..3]=%u, %u, %u, %u\n",
-               ctx->switch_id, psn, len, ntohl(data[0]), ntohl(data[1]), ntohl(data[2]), ntohl(data[3]));
-        fflush(stdout);
-    }
 
     // 调试：检查 device_id 是否有效
     if (device_id < 0 || device_id >= ctx->num_devices) {
@@ -300,21 +293,26 @@ static int send_packet_async(connection_t *conn, int type, uint32_t *data, int l
     }
 
     send_packet_t spkt;
-    spkt.conn_id = -1;  // 不需要，帧已包含完整信息
+    spkt.conn_id = -1;
 
     int size = build_eth_packet(
         spkt.frame, type, (char*)data, len * sizeof(uint32_t),
         conn->my_mac, conn->peer_mac,
         conn->my_ip, conn->peer_ip,
         conn->my_port, conn->peer_port,
-        conn->peer_qp, psn, psn + 1, packet_type, NULL
+        conn->peer_qp, psn, psn + 1, packet_type, (uint8_t*)imm_data
     );
     spkt.frame_len = size;
 
     if (!send_queue_push(&ctx->send_queues[device_id], &spkt)) {
-        return -1;  // 队列满
+        return -1;
     }
     return 0;
+}
+
+// 兼容旧调用的包装函数
+static int send_packet_async(connection_t *conn, int type, uint32_t *data, int len, uint32_t psn, int packet_type) {
+    return send_packet_async_with_imm(conn, type, data, len, psn, packet_type, NULL);
 }
 
 /**
@@ -471,7 +469,7 @@ static void handle_broadcast(switch_context_t *ctx, rule_t *rule, int conn_id, u
  * - 元数据通过 Immediate Data 传递，已在 packet_handler 中解析并存储到上下文
  * - 所有数据包的 payload 都是纯数据，不再有元数据前缀
  */
-static void aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t psn, uint32_t *data, int len, int packet_type) {
+static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t psn, uint32_t *data, int len, int packet_type) {
     int sw_id = ctx->switch_id;
     primitive_type_t op_type = ctx->operation_type;
     int root_rank = ctx->root_rank;
@@ -496,13 +494,32 @@ static void aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t
 
     if (op_type == PRIMITIVE_TYPE_BROADCAST) {
         handle_broadcast(ctx, rule, conn_id, psn, data, len, packet_type);
-        return;
+        return 1;  // Broadcast 总是成功
     }
 
     psn_state_t *state = &ctx->psn_states[Idx(psn)];
     DBG_PSN_PRINT(psn, "[SW%d] AGG using state index=%d, state->degree=%d before lock\n",
            sw_id, Idx(psn), state->degree);
     pthread_mutex_lock(&state->mutex);
+
+    // 检查槽位 PSN 冲突：如果槽位已被占用且 PSN 不匹配，丢弃 PSN 较大的包
+    if (state->degree > 0 && state->agg_buffer.psn != psn) {
+        // 槽位冲突：当前包的 PSN 和槽位中的 PSN 不同
+        if (psn > state->agg_buffer.psn) {
+            // 当前包 PSN 较大（超前一个周期），丢弃当前包，不回复 ACK
+            TS_PRINTF("[SW%d] AGG_CONFLICT: slot %d occupied by PSN=%u, dropping PSN=%u (ahead), NO ACK\n",
+                   sw_id, Idx(psn), state->agg_buffer.psn, psn);
+            pthread_mutex_unlock(&state->mutex);
+            return 0;  // 返回 0 表示处理失败，调用者不应发送 ACK
+        } else {
+            // 槽位中的 PSN 较大（不应该发生，但为安全起见处理）
+            TS_PRINTF("[SW%d] AGG_CONFLICT: slot %d has PSN=%u, current PSN=%u, clearing slot\n",
+                   sw_id, Idx(psn), state->agg_buffer.psn, psn);
+            state->degree = 0;
+            memset(state->arrival, 0, sizeof(state->arrival));
+            state->agg_buffer.state = 0;
+        }
+    }
 
     if (state->degree == 0) {
         DBG_PSN_PRINT(psn, "[SW%d] AGG first arrival: copying %d bytes to agg_buffer\n",
@@ -578,8 +595,22 @@ static void aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t
                 pthread_mutex_unlock(&state->mutex);
 
             } else if (op_type == PRIMITIVE_TYPE_REDUCE) {
-                // Reduce: 仅发送到 root_rank
-                int target_conn = ctx->rank_to_conn[root_rank];
+                // Reduce: 发送到 root_rank 所在的连接
+                // 对于根交换机（Spine），使用 rule->out_conns[0]（指向包含 root_rank 的 Leaf）
+                // 对于叶子交换机，使用 rank_to_conn[root_rank]（直接连接到 host）
+                int target_conn = -1;
+                if (rule->out_conns_cnt > 0) {
+                    // 使用路由规则中的 out_conns（适用于 Spine）
+                    target_conn = rule->out_conns[0] - ctx->conns;  // 指针转索引
+                    // 验证指针有效性
+                    if (target_conn < 0 || target_conn >= ctx->fan_in) {
+                        target_conn = -1;
+                    }
+                }
+                if (target_conn < 0) {
+                    // 回退到 rank_to_conn（适用于直接连接 host 的 Leaf）
+                    target_conn = ctx->rank_to_conn[root_rank];
+                }
                 DBG_PRINT("[SW%d] Reduce: root_rank=%d, target_conn=%d\n",
                        sw_id, root_rank, target_conn);
 
@@ -617,8 +648,10 @@ static void aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t
             }
 
             forwarding(ctx, rule, psn, PACKET_TYPE_DATA, state->agg_buffer.buffer, len, forward_opcode);
+            // 注意：不在这里清理聚合缓冲区，等收到父交换机 ACK 后再清理
         }
     }
+    return 1;  // 成功处理
 }
 
 /**
@@ -877,9 +910,97 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
         DBG_PRINT("[SW%d] CTRL_ACK: conn=%d, ePSN->%d\n", sw_id, conn_id, ctx->agg_epsn[conn_id]);
         forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
 
-        // 注意：不再向父交换机转发控制包
-        // 根交换机会从聚合数据的第一个包中获取操作类型信息
-        // 转发控制包会导致 PSN 冲突（控制包和数据包使用相同的 send_psn）
+        // 非根交换机：向上转发控制包给父交换机（只转发一次）
+        // 根交换机：没有上行节点，解析后丢弃
+        if (!ctx->is_root) {
+            // 使用原子操作确保只转发一次
+            int already_forwarded = __sync_val_compare_and_swap(&ctx->ctrl_forwarded, 0, 1);
+            if (!already_forwarded) {
+                int parent_conn = get_parent_switch_conn(ctx);
+                if (parent_conn >= 0) {
+                    connection_t *parent = &ctx->conns[parent_conn];
+                    uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[parent_conn], 1);
+                    // 获取原始的 imm_data
+                    uint32_t imm = pkt->imm_data;
+                    DBG_PRINT("[SW%d] CTRL_FORWARD: to parent conn %d, send_PSN=%u, imm=0x%08X\n",
+                           sw_id, parent_conn, send_psn, imm);
+                    // 转发控制包（带 imm_data）
+                    send_packet_async_with_imm(parent, PACKET_TYPE_DATA, NULL, 0, send_psn,
+                                      RDMA_OPCODE_SEND_ONLY_WITH_IMM, &imm);
+                }
+            } else {
+                DBG_PRINT("[SW%d] CTRL_SKIP: already forwarded\n", sw_id);
+            }
+        } else {
+            DBG_PRINT("[SW%d] CTRL_DROP: root switch, no upstream\n", sw_id);
+        }
+        return;
+    }
+
+    // ACK 包单独处理，不依赖路由规则
+    if (opcode == RDMA_OPCODE_ACK) {
+        // 忽略 NAK，只处理 ACK
+        if (pkt->is_nak) {
+            DBG_PRINT("[SW%d] ACK_RECV: conn=%d, PSN=%u, is_nak=1 (ignored)\n",
+                   sw_id, conn_id, psn);
+            return;
+        }
+
+        // 根据连接类型判断 ACK 方向
+        int parent_conn = get_parent_switch_conn(ctx);
+        if (conn_id == parent_conn) {
+            // ACK 来自父交换机 → 下行 ACK（确认我们发送的上行数据）
+            DBG_PRINT("[SW%d] ACK_RECV: conn=%d (parent), PSN=%u, DOWN_ACK\n",
+                   sw_id, conn_id, psn);
+            // 下行 ACK：更新 acked_psn，并清理已确认的聚合缓冲区
+            // recv_psn 和 send_psn 相同，直接用 PSN 索引清理
+            if ((int)psn > ctx->acked_psn[conn_id]) {
+                for (int p = ctx->acked_psn[conn_id] + 1; p <= (int)psn; p++) {
+                    psn_state_t *state = &ctx->psn_states[Idx(p)];
+                    pthread_mutex_lock(&state->mutex);
+                    if (state->agg_buffer.state == 1) {
+                        DBG_PRINT("[SW%d] AGG_CLEAR: PSN=%d\n", sw_id, p);
+                        state->degree = 0;
+                        memset(state->arrival, 0, sizeof(state->arrival));
+                        state->agg_buffer.state = 0;
+                    }
+                    pthread_mutex_unlock(&state->mutex);
+                }
+                ctx->acked_psn[conn_id] = psn;
+            }
+        } else {
+            // ACK 来自主机或子交换机 → 上行 ACK（确认我们发送的下行广播）
+            DBG_PRINT("[SW%d] ACK_RECV: conn=%d, PSN=%u, UP_ACK\n",
+                   sw_id, conn_id, psn);
+            // 上行 ACK：使用现有的 handle_upstream_ack 逻辑
+            // 需要一个虚拟的 rule，但实际上只需要更新 ACK 状态
+            if ((int)psn > ctx->latest_ack[conn_id]) {
+                int expected_acks = ctx->is_root ? ctx->fan_in : ctx->host_fan_in;
+                for (int p = ctx->latest_ack[conn_id] + 1; p <= (int)psn; p++) {
+                    int bcast_psn = ctx->send_to_bcast[conn_id][p % SWITCH_ARRAY_LENGTH];
+                    psn_state_t *state = &ctx->psn_states[Idx(bcast_psn)];
+                    pthread_mutex_lock(&state->mutex);
+
+                    if (state->r_arrival[conn_id] == 0) {
+                        state->r_arrival[conn_id] = 1;
+                        state->r_degree++;
+
+                        if (state->r_degree == expected_acks) {
+                            DBG_PRINT("[SW%d] BCAST_DONE: PSN=%d\n", sw_id, bcast_psn);
+                            state->r_degree = 0;
+                            memset(state->r_arrival, 0, sizeof(state->r_arrival));
+                            state->bcast_buffer.state = 0;
+                        }
+                    }
+
+                    pthread_mutex_unlock(&state->mutex);
+                }
+                ctx->latest_ack[conn_id] = psn;
+                if ((int)psn > ctx->acked_psn[conn_id]) {
+                    ctx->acked_psn[conn_id] = psn;
+                }
+            }
+        }
         return;
     }
 
@@ -912,12 +1033,19 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
             TS_PRINTF("[SW%d] DOWN_DATA: PSN=%u, ePSN=%d, len=%d\n", sw_id, psn, ctx->down_epsn, data_len);
             fflush(stdout);
 
-            if ((int)psn != ctx->down_epsn) {
-                // PSN 不符合期望，直接丢弃（等待超时重传）
-                TS_PRINTF("[SW%d] DOWN_DISCARD: PSN=%u != ePSN=%d, drop\n",
+            if ((int)psn < ctx->down_epsn) {
+                // PSN < ePSN：已处理过的包的重传，回复 ACK 但不重复处理
+                TS_PRINTF("[SW%d] DOWN_DUP: PSN=%u < ePSN=%d, ACK only\n",
+                       sw_id, psn, ctx->down_epsn);
+                fflush(stdout);
+                forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
+            } else if ((int)psn > ctx->down_epsn) {
+                // PSN > ePSN：乱序包，丢弃等待重传
+                TS_PRINTF("[SW%d] DOWN_OOO: PSN=%u > ePSN=%d, drop\n",
                        sw_id, psn, ctx->down_epsn);
                 fflush(stdout);
             } else {
+                // PSN == ePSN：正常处理
                 TS_PRINTF("[SW%d] DOWN_OK: PSN=%u, process\n", sw_id, psn);
                 fflush(stdout);
                 forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
@@ -929,36 +1057,35 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
                    sw_id, conn_id, psn, ctx->agg_epsn[conn_id], data_len);
             fflush(stdout);
 
-            if ((int)psn != ctx->agg_epsn[conn_id]) {
-                // PSN 不符合期望，直接丢弃（等待超时重传）
-                TS_PRINTF("[SW%d] UP_DISCARD: conn=%d, PSN=%u != ePSN=%d, drop\n",
+            if ((int)psn < ctx->agg_epsn[conn_id]) {
+                // PSN < ePSN：已处理过的包的重传，回复 ACK 但不重复处理
+                TS_PRINTF("[SW%d] UP_DUP: conn=%d, PSN=%u < ePSN=%d, ACK only\n",
+                       sw_id, conn_id, psn, ctx->agg_epsn[conn_id]);
+                fflush(stdout);
+                forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
+            } else if ((int)psn > ctx->agg_epsn[conn_id]) {
+                // PSN > ePSN：乱序包，丢弃等待重传
+                TS_PRINTF("[SW%d] UP_OOO: conn=%d, PSN=%u > ePSN=%d, drop\n",
                        sw_id, conn_id, psn, ctx->agg_epsn[conn_id]);
                 fflush(stdout);
             } else {
-                TS_PRINTF("[SW%d] UP_OK: conn=%d, PSN=%u, ePSN->%d\n",
-                       sw_id, conn_id, psn, ctx->agg_epsn[conn_id] + 1);
-                fflush(stdout);
-                ctx->agg_epsn[conn_id]++;
-                forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
-                aggregate(ctx, rule, conn_id, psn, data, data_len, opcode);
+                // PSN == ePSN：正常处理
+                // 先调用 aggregate，根据返回值决定是否发送 ACK
+                int agg_result = aggregate(ctx, rule, conn_id, psn, data, data_len, opcode);
+                if (agg_result) {
+                    // 聚合成功，发送 ACK 并递增 ePSN
+                    TS_PRINTF("[SW%d] UP_OK: conn=%d, PSN=%u, ePSN->%d\n",
+                           sw_id, conn_id, psn, ctx->agg_epsn[conn_id] + 1);
+                    fflush(stdout);
+                    ctx->agg_epsn[conn_id]++;
+                    forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
+                } else {
+                    // 聚合失败（槽位冲突），不发送 ACK，等待重传
+                    TS_PRINTF("[SW%d] UP_CONFLICT: conn=%d, PSN=%u, no ACK\n",
+                           sw_id, conn_id, psn);
+                    fflush(stdout);
+                }
             }
-        }
-    } else if (opcode == RDMA_OPCODE_ACK) {
-        // ACK 包（从队列数据包中获取 is_nak）
-        // 忽略 NAK，只处理 ACK
-        if (pkt->is_nak) {
-            DBG_PRINT("[SW%d] ACK_RECV: conn=%d, PSN=%u, is_nak=1 (ignored), dir=%s\n",
-                   sw_id, conn_id, psn, dir_str);
-            return;
-        }
-
-        DBG_PRINT("[SW%d] ACK_RECV: conn=%d, PSN=%u, dir=%s\n",
-               sw_id, conn_id, psn, dir_str);
-
-        if (rule->direction == DIR_DOWN) {
-            handle_downstream_ack(ctx, rule, psn);
-        } else {
-            handle_upstream_ack(ctx, rule, conn_id, psn);
         }
     } else {
         DBG_PRINT("[SW%d] UNKNOWN_OPCODE: 0x%02x\n", sw_id, opcode);
@@ -1161,7 +1288,7 @@ static void *retransmit_thread(void *arg) {
 
                     // 从最后确认的 send_psn + 1 开始重传
                     for (int send_p = acked + 1; send_p < current_send && agg_count < MAX_RETRANSMIT_BATCH; send_p++) {
-                        // 需要找到对应的 recv_psn（send_psn = recv_psn - 1，因为 PSN=0 是控制消息）
+                        // recv_psn == send_psn（控制包和数据包使用相同的 PSN 序列）
                         int recv_p = send_p + 1;
                         psn_state_t *state = &ctx->psn_states[Idx(recv_p)];
                         pthread_mutex_lock(&state->mutex);
