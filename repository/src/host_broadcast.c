@@ -11,7 +11,7 @@ int data_count = 0;
 // 记录开始时间
 struct timeval start_time;
 
-void print_cost_time(const char *prefix) {
+void print_cost_time(const char *prefix, int rank) {
     struct timeval end;
     gettimeofday(&end, NULL);
     double elapsed_ms = (end.tv_sec - start_time.tv_sec) * 1000.0 +
@@ -21,7 +21,11 @@ void print_cost_time(const char *prefix) {
     double elapsed_sec = elapsed_ms / 1000.0;
     double throughput_mbps = (data_bytes * 8.0) / (elapsed_sec * 1e6);
 
-    printf("%s, Time: %.3f ms, Throughput: %.2f Mbps\n", prefix, elapsed_ms, throughput_mbps);
+    printf("\n=== Performance Results (Rank %d) ===\n", rank);
+    printf("Data size: %.2f MB (%d elements)\n", data_bytes / (1024.0 * 1024.0), data_count);
+    printf("Time: %.3f ms (%.3f s)\n", elapsed_ms, elapsed_sec);
+    printf("Throughput: %.2f Mbps (%.2f MB/s)\n", throughput_mbps, throughput_mbps / 8.0);
+    printf("=====================================\n");
     fflush(stdout);
 }
 
@@ -87,7 +91,8 @@ int main(int argc, char *argv[]) {
     // 执行 Broadcast 操作
     inccl_broadcast_sendrecv(comm, data, data_count, root_rank);
 
-    print_cost_time("Broadcast operation completed");
+    // 打印耗时和吞吐量
+    print_cost_time("Broadcast", rank);
 
     printf("Rank %d: After broadcast, data[0..4] = %d, %d, %d, %d, %d\n",
            rank, data[0], data[1], data[2], data[3], data[4]);

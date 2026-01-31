@@ -431,14 +431,25 @@ process_packet()
 ### 8.3 聚合函数 (aggregate)
 
 ```c
-void aggregate(ctx, rule, conn_id, psn, data, len, packet_type) {
+static int aggregate(ctx, rule, conn_id, psn, data, len, packet_type) {
     psn_state_t *state = &ctx->psn_states[Idx(psn)];
 
     pthread_mutex_lock(&state->mutex);
 
+    // PSN 槽位冲突检测：当 PSN 超过 SWITCH_ARRAY_LENGTH 时，槽位会被复用
+    // 如果槽位已被占用且 PSN 不匹配，丢弃 PSN 较大的包（超前一个周期的包）
+    if (state->degree > 0 && state->agg_buffer.psn != psn) {
+        if (psn > state->agg_buffer.psn) {
+            // 当前包 PSN 较大（超前一个周期），丢弃当前包，不回复 ACK
+            pthread_mutex_unlock(&state->mutex);
+            return 0;  // 返回 0 表示处理失败
+        }
+    }
+
     if (state->degree == 0) {
         // 第一个到达：直接复制
         memcpy(state->agg_buffer.buffer, data, len * sizeof(uint32_t));
+        state->agg_buffer.psn = psn;  // 记录 PSN
     } else {
         // 后续到达：累加
         for (int i = 0; i < len; i++) {
@@ -461,8 +472,43 @@ void aggregate(ctx, rule, conn_id, psn, data, len, packet_type) {
             forwarding(ctx, rule, psn, PACKET_TYPE_DATA, state->agg_buffer.buffer, len, packet_type);
         }
     }
+    return 1;  // 成功处理
 }
 ```
+
+### 8.4 PSN 槽位冲突处理
+
+当数据量很大时，PSN 会超过 `SWITCH_ARRAY_LENGTH`，导致槽位被复用：
+
+```
+PSN:     0    1    2   ...  131071  131072  131073  ...
+         │    │    │          │       │       │
+Slot:    0    1    2   ...  131071    0       1     ...
+                              │       │
+                              └───────┴── 槽位冲突！
+```
+
+**冲突场景**：Switch2 发送速度快于 Switch1，导致 Switch2 的 PSN 超前一个周期。
+
+**解决方案**：
+- 在 `aggregate()` 中检测槽位冲突
+- 如果当前包 PSN 大于槽位中已有的 PSN，丢弃当前包
+- 不发送 ACK，等待重传机制处理
+
+### 8.5 重传机制
+
+Switch 实现了超时重传机制，用于处理丢包和槽位冲突：
+
+```c
+#define RETRANSMIT_TIMEOUT_US      1000000   // 1秒超时
+#define RETRANSMIT_CHECK_INTERVAL_US 50000   // 50ms 检查间隔
+```
+
+**重传线程工作流程**：
+1. 每 50ms 检查一次各连接的 ACK 状态
+2. 如果某连接超过 1 秒未收到新 ACK，触发重传
+3. 从 `latest_ack + 1` 开始，重传未确认的数据包
+4. 每次最多重传 `MAX_RETRANSMIT_BATCH` 个包
 
 ---
 
@@ -477,20 +523,37 @@ void aggregate(ctx, rule, conn_id, psn, data, len, packet_type) {
 | switch_context.c | repository/termination_switch/src/ | 交换机上下文管理 |
 | controller.cpp | repository/src/ | 控制器实现 |
 | controller.h | repository/include/ | 控制器头文件 |
-| host_simple_test.c | repository/src/ | 简单测试程序 |
+| host_simple_test.c | repository/src/ | AllReduce 测试程序 |
+| host_reduce.c | repository/src/ | Reduce 测试程序 |
+| host_broadcast.c | repository/src/ | Broadcast 测试程序 |
 
 ---
 
 ## 十、性能特性
 
-### 10.1 测试结果
+### 10.1 测试结果 (1-2-4 拓扑，4 节点)
 
-| 数据量 | AllReduce 耗时 | 吞吐量 |
-|--------|----------------|--------|
-| 1GB | ~89s | ~90 Mbps |
-| 512MB | ~13.8s | ~300 Mbps |
-| 256MB | ~6.4s | ~320 Mbps |
+**AllReduce 性能：**
+
+| 数据量 | 耗时 | 吞吐量 |
+|--------|------|--------|
+| 32MB | ~5.9s | 45.48 Mbps |
 | 128MB | ~3.4s | ~300 Mbps |
+| 256MB | ~6.4s | ~320 Mbps |
+| 512MB | ~13.8s | ~300 Mbps |
+| 1GB | ~89s | ~90 Mbps |
+
+**Reduce 性能：**
+
+| 数据量 | 耗时 | 吞吐量 |
+|--------|------|--------|
+| 32MB | ~5.3s | 50.81 Mbps |
+| 512MB | ~130s | ~31 Mbps |
+
+**性能对比说明：**
+- Reduce 理论上应比 AllReduce 快（只需向 root 发送结果）
+- 实际测试中 Reduce 略快于 AllReduce
+- 大数据量时性能下降，主要受 PSN 槽位冲突和重传影响
 
 ### 10.2 性能瓶颈
 

@@ -113,3 +113,6 @@ void inccl_reduce_write(struct inccl_communicator *comm, int32_t* src_data, uint
 
 // Broadcast operations: root rank sends data to all other ranks
 void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, uint32_t len, int root_rank);
+
+// Barrier: synchronize all ranks
+void inccl_barrier(struct inccl_communicator *comm);

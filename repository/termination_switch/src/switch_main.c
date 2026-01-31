@@ -476,7 +476,8 @@ static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t 
 
     const char *op_str = (op_type == PRIMITIVE_TYPE_ALLREDUCE) ? "AllReduce" :
                          (op_type == PRIMITIVE_TYPE_REDUCE) ? "Reduce" :
-                         (op_type == PRIMITIVE_TYPE_BROADCAST) ? "Broadcast" : "NULL";
+                         (op_type == PRIMITIVE_TYPE_BROADCAST) ? "Broadcast" :
+                         (op_type == PRIMITIVE_TYPE_BARRIER) ? "Barrier" : "NULL";
 
     DBG_PRINT("[SW%d] AGG_RECV: conn=%d, PSN=%u, len=%d, op=%s\n",
            sw_id, conn_id, psn, len, op_str);
@@ -626,6 +627,18 @@ static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t 
                     fprintf(stderr, "[SW%d] ERROR: Invalid target_conn=%d for root_rank=%d\n",
                             sw_id, target_conn, root_rank);
                 }
+
+                // 清理聚合缓冲区
+                pthread_mutex_lock(&state->mutex);
+                state->degree = 0;
+                memset(state->arrival, 0, sizeof(state->arrival));
+                state->agg_buffer.state = 0;
+                pthread_mutex_unlock(&state->mutex);
+            } else if (op_type == PRIMITIVE_TYPE_BARRIER) {
+                // Barrier: 广播确认消息到所有子节点（类似 AllReduce）
+                // Barrier 不需要数据，只需要广播一个空消息作为确认
+                uint32_t barrier_ack[1] = {0};  // 空数据
+                cache_and_broadcast(ctx, rule, psn, barrier_ack, 1, packet_type);
 
                 // 清理聚合缓冲区
                 pthread_mutex_lock(&state->mutex);
@@ -856,6 +869,9 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
             case CTL_PRIMITIVE_BROADCAST:
                 prim = PRIMITIVE_TYPE_BROADCAST;
                 break;
+            case CTL_PRIMITIVE_BARRIER:
+                prim = PRIMITIVE_TYPE_BARRIER;
+                break;
             default:
                 prim = PRIMITIVE_TYPE_NULL;
                 break;
@@ -889,7 +905,8 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
         int sw_id = ctx->switch_id;
         const char *prim_str = (prim == PRIMITIVE_TYPE_ALLREDUCE) ? "AllReduce" :
                                (prim == PRIMITIVE_TYPE_REDUCE) ? "Reduce" :
-                               (prim == PRIMITIVE_TYPE_BROADCAST) ? "Broadcast" : "NULL";
+                               (prim == PRIMITIVE_TYPE_BROADCAST) ? "Broadcast" :
+                               (prim == PRIMITIVE_TYPE_BARRIER) ? "Barrier" : "NULL";
 
         DBG_PRINT("[SW%d] CTRL_RECV: conn=%d, PSN=%u, op=%s, root=%d\n",
                sw_id, conn_id, psn, prim_str, prim_param);
@@ -913,26 +930,38 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
         // 非根交换机：向上转发控制包给父交换机（只转发一次）
         // 根交换机：没有上行节点，解析后丢弃
         if (!ctx->is_root) {
-            // 使用原子操作确保只转发一次
-            int already_forwarded = __sync_val_compare_and_swap(&ctx->ctrl_forwarded, 0, 1);
-            if (!already_forwarded) {
-                int parent_conn = get_parent_switch_conn(ctx);
-                if (parent_conn >= 0) {
-                    connection_t *parent = &ctx->conns[parent_conn];
-                    uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[parent_conn], 1);
-                    // 获取原始的 imm_data
-                    uint32_t imm = pkt->imm_data;
-                    DBG_PRINT("[SW%d] CTRL_FORWARD: to parent conn %d, send_PSN=%u, imm=0x%08X\n",
-                           sw_id, parent_conn, send_psn, imm);
-                    // 转发控制包（带 imm_data）
-                    send_packet_async_with_imm(parent, PACKET_TYPE_DATA, NULL, 0, send_psn,
-                                      RDMA_OPCODE_SEND_ONLY_WITH_IMM, &imm);
-                }
+            // 对于 Barrier，叶子交换机需要聚合本地 Host 的控制消息
+            if (prim == PRIMITIVE_TYPE_BARRIER) {
+                uint32_t empty_data[1] = {0};
+                aggregate(ctx, rule, conn_id, psn, empty_data, 1, RDMA_OPCODE_SEND_ONLY);
             } else {
-                DBG_PRINT("[SW%d] CTRL_SKIP: already forwarded\n", sw_id);
+                // 其他操作：使用原子操作确保只转发一次
+                int already_forwarded = __sync_val_compare_and_swap(&ctx->ctrl_forwarded, 0, 1);
+                if (!already_forwarded) {
+                    int parent_conn = get_parent_switch_conn(ctx);
+                    if (parent_conn >= 0) {
+                        connection_t *parent = &ctx->conns[parent_conn];
+                        uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[parent_conn], 1);
+                        uint32_t imm = pkt->imm_data;
+                        DBG_PRINT("[SW%d] CTRL_FORWARD: to parent conn %d, send_PSN=%u, imm=0x%08X\n",
+                               sw_id, parent_conn, send_psn, imm);
+                        send_packet_async_with_imm(parent, PACKET_TYPE_DATA, NULL, 0, send_psn,
+                                          RDMA_OPCODE_SEND_ONLY_WITH_IMM, &imm);
+                    }
+                } else {
+                    DBG_PRINT("[SW%d] CTRL_SKIP: already forwarded\n", sw_id);
+                }
             }
         } else {
-            DBG_PRINT("[SW%d] CTRL_DROP: root switch, no upstream\n", sw_id);
+            // 根交换机：对于 Barrier，需要聚合所有子交换机的控制消息后广播确认
+            if (prim == PRIMITIVE_TYPE_BARRIER) {
+                // 调用 aggregate 来收集 Barrier 控制消息
+                // Barrier 不需要数据，传入空数据
+                uint32_t empty_data[1] = {0};
+                aggregate(ctx, rule, conn_id, psn, empty_data, 1, RDMA_OPCODE_SEND_ONLY);
+            } else {
+                DBG_PRINT("[SW%d] CTRL_DROP: root switch, no upstream\n", sw_id);
+            }
         }
         return;
     }

@@ -12,7 +12,8 @@ typedef enum {
     PRIMITIVE_TYPE_NULL = 0,
     PRIMITIVE_TYPE_ALLREDUCE = 1,
     PRIMITIVE_TYPE_REDUCE = 2,
-    PRIMITIVE_TYPE_BROADCAST = 3
+    PRIMITIVE_TYPE_BROADCAST = 3,
+    PRIMITIVE_TYPE_BARRIER = 4
 } primitive_type_t;
 
 // ==================== 控制包协议定义 ====================
@@ -23,6 +24,7 @@ typedef enum {
 #define CTL_PRIMITIVE_ALLREDUCE  0x00  // 00
 #define CTL_PRIMITIVE_REDUCE     0x01  // 01
 #define CTL_PRIMITIVE_BROADCAST  0x02  // 10
+#define CTL_PRIMITIVE_BARRIER    0x03  // 11
 
 // Operator 类型 (2 bits)
 #define CTL_OPERATOR_BARRIER     0x00  // 00

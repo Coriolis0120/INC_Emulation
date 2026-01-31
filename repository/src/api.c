@@ -1754,3 +1754,86 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
     printf("Broadcast operation completed for rank %d\n", my_rank);
     fflush(stdout);
 }
+
+/**
+ * Barrier 同步原语
+ * 所有节点到达 barrier 点后才能继续执行
+ *
+ * 协议说明：
+ * - 所有节点发送一个控制消息（带 BARRIER primitive）
+ * - Switch 收集所有节点的消息后，广播确认消息
+ * - 所有节点收到确认后继续执行
+ */
+void inccl_barrier(struct inccl_communicator *comm) {
+    int my_rank = comm->group->rank;
+
+    printf("Rank %d: Entering barrier\n", my_rank);
+    fflush(stdout);
+
+    // 发送控制消息
+    uint32_t imm_data = BUILD_IMM_DATA(CTL_DEST_RANK_ALL, CTL_PRIMITIVE_BARRIER, CTL_OPERATOR_BARRIER, CTL_DATATYPE_INT32);
+    printf("Rank %d: Sending barrier control message, imm_data=0x%08X\n", my_rank, imm_data);
+    fflush(stdout);
+
+    send_control_message(comm, imm_data);
+
+    // 预先提交一个接收请求，等待 Switch 的确认消息
+    struct ibv_recv_wr rr;
+    struct ibv_sge receive_sge;
+    struct ibv_recv_wr *receive_bad_wr;
+
+    memset(&receive_sge, 0, sizeof(receive_sge));
+    receive_sge.addr = (uintptr_t)comm->receive_payload;
+    receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+    receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = 0;
+    rr.sg_list = &receive_sge;
+    rr.num_sge = 1;
+
+    ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+
+    // 等待确认消息
+    struct ibv_wc wc;
+    struct timeval start_time, current_time;
+    gettimeofday(&start_time, NULL);
+
+    while(1) {
+        // 超时检测
+        gettimeofday(&current_time, NULL);
+        uint64_t elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                              (current_time.tv_usec - start_time.tv_usec);
+        if(elapsed_us > POLL_TIMEOUT_US) {
+            printf("[Barrier] TIMEOUT for rank %d!\n", my_rank);
+            fflush(stdout);
+            return;
+        }
+
+        int result = ibv_poll_cq(comm->cq, 1, &wc);
+        if(result > 0) {
+            if(wc.status == IBV_WC_SUCCESS &&
+               (wc.opcode == IBV_WC_RECV || wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                printf("Rank %d: Barrier confirmation received\n", my_rank);
+                fflush(stdout);
+                break;
+            } else if(wc.status == IBV_WC_SUCCESS && wc.opcode == IBV_WC_SEND) {
+                // 发送完成，继续等待接收
+                continue;
+            } else if(wc.status != IBV_WC_SUCCESS) {
+                printf("Rank %d: Barrier error, wc status=%d, opcode=%d\n",
+                       my_rank, wc.status, wc.opcode);
+                fflush(stdout);
+                return;
+            }
+        } else if(result < 0) {
+            printf("Rank %d: Barrier poll_cq error: %d\n", my_rank, result);
+            fflush(stdout);
+            return;
+        }
+    }
+
+    printf("Rank %d: Barrier completed\n", my_rank);
+    fflush(stdout);
+}

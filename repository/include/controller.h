@@ -482,6 +482,76 @@ struct controller_communicator{
     }
 
     /**
+     * @brief 生成 Barrier 规则 - 支持多层拓扑
+     *
+     * Barrier: 所有节点同步，类似 AllReduce 但不传输数据
+     */
+    void generate_barrier_rules() {
+        for (int sw_id = 0; sw_id < TOPOLOGY_SIZE; sw_id++) {
+            auto& sw = switches[sw_id];
+            std::vector<int> host_conns = get_host_conns(sw_id);
+            std::vector<int> switch_conns = get_switch_conns(sw_id);
+
+            if (sw.is_root) {
+                // 根交换机：从子交换机接收 barrier 消息
+                for (auto& conn : sw.connections) {
+                    if (!conn.is_switch) continue;
+
+                    RuleConfig rule;
+                    rule.src_ip = conn.peer_ip;
+                    rule.dst_ip = conn.my_ip;
+                    rule.primitive = 4;  // BARRIER
+                    rule.primitive_param = -1;
+                    rule.conn_id = conn.conn_id;
+                    rule.direction = 0;  // DIR_UP
+                    rule.root = true;
+                    rule.ack_conn = conn.conn_id;
+                    rule.out_conns = switch_conns;
+
+                    sw.rules.push_back(rule);
+                }
+            } else {
+                // 叶子交换机
+                int parent_conn = get_parent_conn(sw_id);
+
+                for (auto& conn : sw.connections) {
+                    if (conn.is_switch) continue;
+
+                    RuleConfig rule;
+                    rule.src_ip = conn.peer_ip;
+                    rule.dst_ip = conn.my_ip;
+                    rule.primitive = 4;  // BARRIER
+                    rule.primitive_param = -1;
+                    rule.conn_id = conn.conn_id;
+                    rule.direction = 0;  // DIR_UP
+                    rule.root = false;
+                    rule.ack_conn = conn.conn_id;
+                    rule.out_conns = {parent_conn};
+
+                    sw.rules.push_back(rule);
+                }
+
+                // 从父交换机接收广播确认
+                if (parent_conn >= 0) {
+                    auto& pconn = sw.connections[parent_conn];
+                    RuleConfig rule;
+                    rule.src_ip = pconn.peer_ip;
+                    rule.dst_ip = pconn.my_ip;
+                    rule.primitive = 4;  // BARRIER
+                    rule.primitive_param = -1;
+                    rule.conn_id = parent_conn;
+                    rule.direction = 1;  // DIR_DOWN
+                    rule.root = false;
+                    rule.ack_conn = parent_conn;
+                    rule.out_conns = host_conns;
+
+                    sw.rules.push_back(rule);
+                }
+            }
+        }
+    }
+
+    /**
      * @brief 计算路由并生成规则
      *
      * 1. 初始化 connections
@@ -639,6 +709,9 @@ struct controller_communicator{
 
         generate_broadcast_rules();
         printf("[Controller] Broadcast rules generated\n");
+
+        generate_barrier_rules();
+        printf("[Controller] Barrier rules generated\n");
 
         // 4) 生成 YAML
         generate_yaml();
