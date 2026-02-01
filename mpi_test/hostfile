@@ -1,0 +1,6 @@
+# MPI hostfile - 使用管理网络 IP 进行 SSH
+# MPI 数据通信通过 --mca btl_tcp_if_include 指定走 eth1
+192.168.0.14 slots=1
+192.168.0.22 slots=1
+192.168.0.20 slots=1
+192.168.0.13 slots=1

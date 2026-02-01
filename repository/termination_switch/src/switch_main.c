@@ -34,8 +34,8 @@
 #define DEBUG_VERBOSE 0
 
 // 重传相关参数
-#define RETRANSMIT_TIMEOUT_US 1000000   // 2s 超时
-#define RETRANSMIT_CHECK_INTERVAL_US 1000000  // 50ms 检查间隔
+#define RETRANSMIT_TIMEOUT_US 2000000   // 2s 超时
+#define RETRANSMIT_CHECK_INTERVAL_US 50000  // 50ms 检查间隔
 #define MAX_RETRANSMIT_BATCH 64  // 每批最多重传的数据包数量
 
 // 重传数据包信息结构体（用于避免持锁发送）
@@ -871,7 +871,7 @@ static void packet_handler(uint8_t *user_data, const struct pcap_pkthdr *pkthdr,
     if (opcode == RDMA_OPCODE_ACK) {
         aeth_t *aeth = (aeth_t*)(packet + sizeof(eth_header_t) + sizeof(ipv4_header_t) +
                                   sizeof(udp_header_t) + sizeof(bth_header_t));
-        qpkt.is_nak = (ntohl(aeth->syn_msn) >> 29) != 0;
+        qpkt.is_nak = (ntohl(aeth->syn_msn) >> 30) != 0;
     }
 
     // 直接处理数据包（移除队列，避免时序问题）
@@ -1105,6 +1105,29 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
         if (pkt->is_nak) {
             DBG_PRINT("[SW%d] ACK_RECV: conn=%d, PSN=%u, is_nak=1 (ignored)\n",
                    sw_id, conn_id, psn);
+#ifdef DEBUG_VERBOSE
+            // 打印 NAK 相关的详细调试信息
+            int parent_conn = get_parent_switch_conn(ctx);
+            int bcast_psn = ctx->send_to_bcast[conn_id][Idx(psn)];
+            psn_state_t *state = &ctx->psn_states[Idx(bcast_psn)];
+            fprintf(stderr, "[SW%d] NAK_DEBUG: conn=%d, recv_PSN=%u, parent_conn=%d\n",
+                   sw_id, conn_id, psn, parent_conn);
+            fprintf(stderr, "[SW%d] NAK_DEBUG: send_to_bcast[%d][%d]=%d\n",
+                   sw_id, conn_id, Idx(psn), bcast_psn);
+            fprintf(stderr, "[SW%d] NAK_DEBUG: send_psn[%d]=%d, acked_psn[%d]=%d\n",
+                   sw_id, conn_id, ctx->send_psn[conn_id], conn_id, ctx->acked_psn[conn_id]);
+            fprintf(stderr, "[SW%d] NAK_DEBUG: bcast_buffer: state=%d, psn=%d, len=%d, op=%d\n",
+                   sw_id, state->bcast_buffer.state, state->bcast_buffer.psn,
+                   state->bcast_buffer.len, state->bcast_buffer.operation_type);
+            fprintf(stderr, "[SW%d] NAK_DEBUG: r_degree=%d, r_arrival=[%d,%d,%d,%d]\n",
+                   sw_id, state->r_degree,
+                   state->r_arrival[0], state->r_arrival[1],
+                   state->r_arrival[2], state->r_arrival[3]);
+            fprintf(stderr, "[SW%d] NAK_DEBUG: bcast_send_psn=[%d,%d,%d,%d]\n",
+                   sw_id, state->bcast_send_psn[0], state->bcast_send_psn[1],
+                   state->bcast_send_psn[2], state->bcast_send_psn[3]);
+            fflush(stderr);
+#endif
             return;
         }
 

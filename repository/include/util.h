@@ -170,7 +170,7 @@ typedef enum {
     PACKET_TYPE_CONTROLL
 } packet_type_t;
 
-#define PAYLOAD_LEN 1024 // mtu bytes
+#define PAYLOAD_LEN 4096 // mtu bytes (4KB per packet)
 #define ELEMENT_SIZE sizeof(int32_t)
 
 typedef struct {
