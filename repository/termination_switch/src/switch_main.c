@@ -31,10 +31,10 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 0
+#define DEBUG_VERBOSE 1
 
 // 重传相关参数
-#define RETRANSMIT_TIMEOUT_US 500000   // 2s 超时
+#define RETRANSMIT_TIMEOUT_US 1000000   // 2s 超时
 #define RETRANSMIT_CHECK_INTERVAL_US 50000  // 50ms 检查间隔
 #define MAX_RETRANSMIT_BATCH 64  // 每批最多重传的数据包数量
 
@@ -992,21 +992,12 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
             return;
         }
 
-        // 上行控制消息：需要查找规则
-        char src_str[INET_ADDRSTRLEN], dst_str[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &pkt->src_ip, src_str, sizeof(src_str));
-        inet_ntop(AF_INET, &pkt->dst_ip, dst_str, sizeof(dst_str));
-
-        rule_t *rule = lookup_rule(&ctx->routing_table, pkt->src_ip, pkt->dst_ip, prim, prim_param);
-        if (!rule) {
-            DBG_PRINT("[SW%d] CTRL_NO_RULE: src=%s, dst=%s\n", sw_id, src_str, dst_str);
-            return;
-        }
-
+        // 上行控制消息：不需要查找规则，直接聚合
         // 发送 ACK 并更新 ePSN
         ctx->agg_epsn[conn_id]++;
+        connection_t *src_conn = &ctx->conns[conn_id];
+        send_packet_async(src_conn, PACKET_TYPE_ACK, NULL, 0, psn, RDMA_OPCODE_ACK);
         DBG_PRINT("[SW%d] CTRL_ACK: conn=%d, ePSN->%d\n", sw_id, conn_id, ctx->agg_epsn[conn_id]);
-        forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
 
         // 上行控制消息处理
         if (!ctx->is_root) {
@@ -1376,6 +1367,10 @@ static void *retransmit_thread(void *arg) {
         // 对每个连接，从 latest_ack[conn_id] + 1 到 send_psn[conn_id] 重传
         int parent_conn = ctx->is_root ? -1 : get_parent_switch_conn(ctx);
 
+        // 调试：打印重传检查状态
+        TS_PRINTF("[SW%d] RETRANSMIT_CHECK: fan_in=%d, parent_conn=%d\n",
+                  sw_id, ctx->fan_in, parent_conn);
+
         retransmit_info_t bcast_retransmit[MAX_RETRANSMIT_BATCH];
         int bcast_count = 0;
 
@@ -1386,12 +1381,22 @@ static void *retransmit_thread(void *arg) {
             int acked = ctx->latest_ack[conn_id];
             int current_send = ctx->send_psn[conn_id];
 
+            // 调试：打印每个连接的 ACK 状态
+            TS_PRINTF("[SW%d] conn=%d: acked=%d, send_psn=%d, gap=%d\n",
+                      sw_id, conn_id, acked, current_send, current_send - acked - 1);
+
             // 从最后确认的 PSN + 1 开始重传
             for (int send_p = acked + 1; send_p < current_send && bcast_count < MAX_RETRANSMIT_BATCH; send_p++) {
                 // 通过 send_psn 找到对应的 bcast_psn
                 int bcast_psn = ctx->send_to_bcast[conn_id][send_p % SWITCH_ARRAY_LENGTH];
                 psn_state_t *state = &ctx->psn_states[Idx(bcast_psn)];
                 pthread_mutex_lock(&state->mutex);
+
+                // 调试：打印 bcast_buffer 状态
+                if (send_p == acked + 1) {
+                    TS_PRINTF("[SW%d] conn=%d, send_p=%d, bcast_psn=%d, state=%d\n",
+                              sw_id, conn_id, send_p, bcast_psn, state->bcast_buffer.state);
+                }
 
                 if (state->bcast_buffer.state == 1) {
                     retransmit_info_t *info = &bcast_retransmit[bcast_count];

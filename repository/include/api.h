@@ -120,3 +120,7 @@ void inccl_barrier(struct inccl_communicator *comm);
 // ReduceScatter: reduce all data and scatter result to all ranks
 // Each rank receives len/world_size elements of the aggregated result
 void inccl_reducescatter(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
+
+// AllGather: gather data from all ranks to all ranks
+// Each rank contributes len elements, all ranks receive len*world_size elements
+void inccl_allgather(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);

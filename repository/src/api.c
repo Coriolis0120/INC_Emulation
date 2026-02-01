@@ -1670,10 +1670,13 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
             }
         }
 
-        // 准备发送数据
-        int32_t *send_buffer = (int32_t*)comm->send_payload;
-        for(int i = 0; i < message_num; i++) {
-            int32_t *msg_buffer = send_buffer + i * PAYLOAD_COUNT;
+        // 准备发送数据（只准备初始窗口内的数据）
+        struct ibv_send_wr wr;
+        struct ibv_sge send_sge;
+        struct ibv_send_wr *send_bad_wr;
+
+        for(int i = 0; i < window_size && i < message_num; i++) {
+            int32_t *msg_buffer = (int32_t*)(comm->send_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
             for(int j = 0; j < PAYLOAD_COUNT; j++) {
                 int src_idx = i * PAYLOAD_COUNT + j;
                 if(src_idx < (int)len) {
@@ -1685,11 +1688,7 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
         }
 
         // 发送初始窗口内的消息
-        struct ibv_send_wr wr;
-        struct ibv_sge send_sge;
-        struct ibv_send_wr *send_bad_wr;
-
-        for(int i = 0; i < comm->window_size/(MESSAGE_SIZE) && i < message_num; i++) {
+        for(int i = 0; i < window_size && i < message_num; i++) {
             memset(&send_sge, 0, sizeof(send_sge));
             send_sge.addr = (uintptr_t)(comm->send_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
             send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
@@ -1706,25 +1705,48 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
             ibv_post_send(comm->qp, &wr, &send_bad_wr);
             send_num++;
         }
+        printf("Broadcast root: sent initial window %d messages\n", send_num);
+        fflush(stdout);
 
-        // 等待所有发送完成
+        // 等待发送完成并滑动窗口发送
         struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc)*message_num);
         int send_complete = 0;
 
+        struct timeval start_time, current_time;
+        gettimeofday(&start_time, NULL);
+        uint64_t last_warn_time = 0;
+
         while(send_complete < message_num) {
+            // 超时检测
+            gettimeofday(&current_time, NULL);
+            uint64_t elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                                  (current_time.tv_usec - start_time.tv_usec);
+
+            if(elapsed_us > POLL_TIMEOUT_US) {
+                printf("[Broadcast] TIMEOUT! send_complete=%d/%d, send_num=%d\n",
+                       send_complete, message_num, send_num);
+                fflush(stdout);
+                free(wc);
+                return;
+            }
+
+            if(elapsed_us - last_warn_time > POLL_WARN_INTERVAL) {
+                printf("[Broadcast] Warning: waiting %lu us, complete=%d/%d\n",
+                       elapsed_us, send_complete, message_num);
+                fflush(stdout);
+                last_warn_time = elapsed_us;
+            }
+
             int result = ibv_poll_cq(comm->cq, message_num, wc);
             if(result > 0) {
                 for(int i = 0; i < result; i++){
                     struct ibv_wc *tmp = wc + i;
 
                     if(tmp->status==IBV_WC_SUCCESS && tmp->opcode==IBV_WC_SEND) {
-                        printf("Broadcast root rank %d send success\n", my_rank);
-                        fflush(stdout);
                         send_complete++;
 
-                        // 滑动窗口：发送下一个消息
+                        // 滑动窗口：发送完成后发送下一个消息
                         if(send_num < message_num) {
-                            // 动态准备数据到滑动窗口槽位
                             int send_slot = send_num % window_size;
                             int32_t *msg_buffer = (int32_t*)(comm->send_payload + send_slot * PAYLOAD_COUNT * sizeof(int32_t));
                             for(int j = 0; j < PAYLOAD_COUNT; j++) {
@@ -1753,20 +1775,20 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
                             send_num++;
                         }
                     } else if(tmp->status!=IBV_WC_SUCCESS) {
-                        printf("Broadcast root rank %d error: wc status: %d, opcode: %d\n",
-                               my_rank, tmp->status, tmp->opcode);
+                        printf("Broadcast root error: wc status=%d, opcode=%d\n",
+                               tmp->status, tmp->opcode);
                         fflush(stdout);
-                        free(wc);
-                        return;
                     }
                 }
             } else if(result < 0) {
-                printf("Broadcast root rank %d ibv_poll_cq error: %d\n", my_rank, result);
+                printf("Broadcast root ibv_poll_cq error: %d\n", result);
                 fflush(stdout);
                 free(wc);
                 return;
             }
         }
+        printf("Broadcast root: all %d sends completed\n", send_complete);
+        fflush(stdout);
         free(wc);
 
     } else {
@@ -2071,5 +2093,56 @@ void inccl_reducescatter(struct inccl_communicator *comm, int32_t* src_data, uin
 
     free(temp_dst);
     printf("[ReduceScatter] Rank %d: Completed\n", my_rank);
+    fflush(stdout);
+}
+
+/**
+ * AllGather 操作
+ * 每个节点贡献一份数据，最终所有节点都收到所有数据的拼接结果
+ *
+ * 实现方式：使用 world_size 次 Broadcast 操作
+ * - 第 i 次 Broadcast：rank i 广播自己的数据给所有节点
+ * - 每个节点将收到的数据放到 dst_data 的第 i 块
+ *
+ * 参数：
+ * - comm: 通信器
+ * - src_data: 源数据（每个节点提供 len 个元素）
+ * - len: 每个节点的数据元素数
+ * - dst_data: 目标缓冲区（每个节点接收 len * world_size 个元素）
+ */
+void inccl_allgather(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data) {
+    int my_rank = comm->group->rank;
+    int world_size = comm->group->world_size;
+
+    printf("[AllGather] Rank %d: Starting, len=%u, world_size=%d, total_size=%u\n",
+           my_rank, len, world_size, len * world_size);
+    printf("[AllGather] Rank %d: Using %d Broadcast operations\n", my_rank, world_size);
+    fflush(stdout);
+
+    // 执行 world_size 次 Broadcast 操作
+    for (int i = 0; i < world_size; i++) {
+        // 第 i 次 Broadcast：rank i 广播自己的数据
+        int32_t *chunk_dst = dst_data + i * len;
+
+        printf("[AllGather] Rank %d: Broadcast %d/%d, root=%d\n",
+               my_rank, i + 1, world_size, i);
+        fflush(stdout);
+
+        if (my_rank == i) {
+            // 我是这次 Broadcast 的 root，先把自己的数据复制到目标位置
+            memcpy(chunk_dst, src_data, len * sizeof(int32_t));
+            // 然后广播
+            inccl_broadcast_sendrecv(comm, chunk_dst, len, i);
+        } else {
+            // 我不是 root，接收数据到目标位置
+            inccl_broadcast_sendrecv(comm, chunk_dst, len, i);
+        }
+
+        printf("[AllGather] Rank %d: Broadcast %d done, chunk[0]=%d\n",
+               my_rank, i + 1, chunk_dst[0]);
+        fflush(stdout);
+    }
+
+    printf("[AllGather] Rank %d: Completed\n", my_rank);
     fflush(stdout);
 }

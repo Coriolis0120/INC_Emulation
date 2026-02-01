@@ -130,3 +130,10 @@ target_link_libraries(host_reducescatter ibverbs pthread pcap ${YAML_CPP_STATIC}
 if(OPT_FLAGS)
     target_compile_options(host_reducescatter PRIVATE ${OPT_FLAGS})
 endif()
+
+# host_allgather (AllGather测试)
+add_executable(host_allgather src/host_allgather.c ${COMMON_SRCS} ${CONFIG_PARSER})
+target_link_libraries(host_allgather ibverbs pthread pcap ${YAML_CPP_STATIC})
+if(OPT_FLAGS)
+    target_compile_options(host_allgather PRIVATE ${OPT_FLAGS})
+endif()
