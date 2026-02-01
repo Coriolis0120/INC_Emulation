@@ -129,7 +129,8 @@ typedef struct {
 
     // === PSN 管理 ===
     int agg_epsn[MAX_CONNECTIONS_NUM];           // 期望的上行PSN
-    int down_epsn;                  // 期望的下行PSN
+    int recv_epsn[MAX_CONNECTIONS_NUM];          // 期望从每个连接接收的下行PSN
+    int down_epsn;                  // 广播缓冲区索引（bcast_psn）
     int latest_ack[MAX_CONNECTIONS_NUM];         // 最后确认的上行PSN
     int down_ack;                   // 最后确认的下行PSN
     int send_psn[MAX_CONNECTIONS_NUM];           // 每个连接的发送PSN（用于下行广播）

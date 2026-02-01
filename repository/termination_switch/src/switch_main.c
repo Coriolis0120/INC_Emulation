@@ -31,11 +31,11 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 1
+#define DEBUG_VERBOSE 0
 
 // 重传相关参数
 #define RETRANSMIT_TIMEOUT_US 1000000   // 2s 超时
-#define RETRANSMIT_CHECK_INTERVAL_US 50000  // 50ms 检查间隔
+#define RETRANSMIT_CHECK_INTERVAL_US 1000000  // 50ms 检查间隔
 #define MAX_RETRANSMIT_BATCH 64  // 每批最多重传的数据包数量
 
 // 重传数据包信息结构体（用于避免持锁发送）
@@ -446,9 +446,27 @@ static void handle_broadcast(switch_context_t *ctx, rule_t *rule, int conn_id, u
     DBG_PRINT("[SW%d] handle_broadcast: from conn %d, root_rank=%d, PSN=%u, len=%d\n",
            sw_id, conn_id, root_rank, psn, len);
 
+    // 使用 down_epsn 作为统一的广播 PSN（用于重传索引）
+    uint32_t bcast_psn = ctx->down_epsn;
+    psn_state_t *state = &ctx->psn_states[Idx(bcast_psn)];
+
+    // 加锁保护 bcast_buffer 的写入（与重传线程同步）
+    pthread_mutex_lock(&state->mutex);
+
+    // 缓存到广播缓冲区，用于重传
+    memcpy(state->bcast_buffer.buffer, data, len * sizeof(uint32_t));
+    state->bcast_buffer.len = len;
+    state->bcast_buffer.packet_type = packet_type;
+    state->bcast_buffer.state = 1;
+    state->bcast_buffer.psn = bcast_psn;
+
+    pthread_mutex_unlock(&state->mutex);
+
+    ctx->down_epsn++;
+
     int send_opcode = strip_immediate_opcode(packet_type);
 
-    // 广播到所有非 root 节点
+    // 广播到所有非 sender 节点
     for (int i = 0; i < ctx->fan_in; i++) {
         if (i == conn_id) {
             DBG_PRINT("[SW%d] Broadcast: skip sender conn %d\n", sw_id, i);
@@ -457,12 +475,16 @@ static void handle_broadcast(switch_context_t *ctx, rule_t *rule, int conn_id, u
 
         connection_t *conn = &ctx->conns[i];
         uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[i], 1);
-        DBG_PRINT("[SW%d] Broadcast: to conn %d, recv_PSN=%u, send_PSN=%u\n",
-               sw_id, i, psn, send_psn);
+
+        // 记录 send_psn -> bcast_psn 的映射，用于 ACK 处理和重传
+        ctx->send_to_bcast[i][send_psn % SWITCH_ARRAY_LENGTH] = bcast_psn;
+
+        DBG_PRINT("[SW%d] Broadcast: to conn %d, recv_PSN=%u, send_PSN=%u, bcast_PSN=%u\n",
+               sw_id, i, psn, send_psn, bcast_psn);
         send_packet_async(conn, PACKET_TYPE_DATA, data, len, send_psn, send_opcode);
     }
 
-    DBG_PRINT("[SW%d] Broadcast complete for PSN=%u\n", sw_id, psn);
+    DBG_PRINT("[SW%d] Broadcast complete for PSN=%u, bcast_PSN=%u\n", sw_id, psn, bcast_psn);
 }
 
 /**
@@ -961,6 +983,7 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
             // 叶子交换机收到来自 Spine 的下行控制消息：广播给所有本地 Host
             // 不需要查找规则，直接广播
             ctx->down_epsn++;
+            ctx->recv_epsn[conn_id]++;  // 递增从父交换机接收的期望 PSN
 
             // 更新元数据（在收到下行控制消息时更新）
             pthread_mutex_lock(&ctx->meta_mutex);
@@ -1091,7 +1114,7 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
             // ACK 来自父交换机 → 下行 ACK（确认我们发送的上行数据）
             DBG_PRINT("[SW%d] ACK_RECV: conn=%d (parent), PSN=%u, DOWN_ACK\n",
                    sw_id, conn_id, psn);
-            // 下行 ACK：更新 acked_psn，并清理已确认的聚合缓冲区
+            // 下行 ACK：更新 acked_psn 和 latest_ack，并清理已确认的聚合缓冲区
             // recv_psn 和 send_psn 相同，直接用 PSN 索引清理
             if ((int)psn > ctx->acked_psn[conn_id]) {
                 for (int p = ctx->acked_psn[conn_id] + 1; p <= (int)psn; p++) {
@@ -1106,6 +1129,10 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
                     pthread_mutex_unlock(&state->mutex);
                 }
                 ctx->acked_psn[conn_id] = psn;
+            }
+            // 同时更新 latest_ack，用于重传线程判断（Broadcast 上行转发需要）
+            if ((int)psn > ctx->latest_ack[conn_id]) {
+                ctx->latest_ack[conn_id] = psn;
             }
         } else {
             // ACK 来自主机或子交换机 → 上行 ACK（确认我们发送的下行广播）
@@ -1169,23 +1196,27 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
 
         if (rule->direction == DIR_DOWN) {
             // 下行数据：缓存并广播
-            TS_PRINTF("[SW%d] DOWN_DATA: PSN=%u, ePSN=%d, len=%d\n", sw_id, psn, ctx->down_epsn, data_len);
+            // 使用 recv_epsn[conn_id] 跟踪从该连接期望接收的 PSN
+            int recv_epsn = ctx->recv_epsn[conn_id];
+            TS_PRINTF("[SW%d] DOWN_DATA: conn=%d, PSN=%u, ePSN=%d, len=%d\n",
+                   sw_id, conn_id, psn, recv_epsn, data_len);
             fflush(stdout);
 
-            if ((int)psn < ctx->down_epsn) {
+            if ((int)psn < recv_epsn) {
                 // PSN < ePSN：已处理过的包的重传，回复 ACK 但不重复处理
-                TS_PRINTF("[SW%d] DOWN_DUP: PSN=%u < ePSN=%d, ACK only\n",
-                       sw_id, psn, ctx->down_epsn);
+                TS_PRINTF("[SW%d] DOWN_DUP: conn=%d, PSN=%u < ePSN=%d, ACK only\n",
+                       sw_id, conn_id, psn, recv_epsn);
                 fflush(stdout);
                 forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
-            } else if ((int)psn > ctx->down_epsn) {
+            } else if ((int)psn > recv_epsn) {
                 // PSN > ePSN：乱序包，丢弃等待重传
-                TS_PRINTF("[SW%d] DOWN_OOO: PSN=%u > ePSN=%d, drop\n",
-                       sw_id, psn, ctx->down_epsn);
+                TS_PRINTF("[SW%d] DOWN_OOO: conn=%d, PSN=%u > ePSN=%d, drop\n",
+                       sw_id, conn_id, psn, recv_epsn);
                 fflush(stdout);
             } else {
                 // PSN == ePSN：正常处理
-                TS_PRINTF("[SW%d] DOWN_OK: PSN=%u, process\n", sw_id, psn);
+                ctx->recv_epsn[conn_id]++;
+                TS_PRINTF("[SW%d] DOWN_OK: conn=%d, PSN=%u, process\n", sw_id, conn_id, psn);
                 fflush(stdout);
                 forwarding(ctx, rule, psn, PACKET_TYPE_ACK, NULL, 0, RDMA_OPCODE_ACK);
 
@@ -1376,7 +1407,7 @@ static void *retransmit_thread(void *arg) {
 
         for (int conn_id = 0; conn_id < ctx->fan_in && bcast_count < MAX_RETRANSMIT_BATCH; conn_id++) {
             if (!ctx->conns[conn_id].ok) continue;
-            if (conn_id == parent_conn) continue;  // 跳过父连接
+            // 不再跳过父连接，因为 Broadcast 上行转发也需要重传
 
             int acked = ctx->latest_ack[conn_id];
             int current_send = ctx->send_psn[conn_id];
@@ -1423,7 +1454,9 @@ static void *retransmit_thread(void *arg) {
             pthread_mutex_unlock(&state_check->mutex);
 
             if (still_needed) {
-                DBG_PRINT("[SW%d] BCAST_RETRANSMIT: PSN=%d, len=%d\n", sw_id, info->psn, info->len);
+                TS_PRINTF("[SW%d] BCAST_RETRANSMIT: conn=%ld, PSN=%d, len=%d\n",
+                          sw_id, info->conn - ctx->conns, info->psn, info->len);
+                fflush(stdout);
                 send_packet_async(info->conn, PACKET_TYPE_DATA, info->buffer, info->len, info->psn, info->opcode);
             }
         }

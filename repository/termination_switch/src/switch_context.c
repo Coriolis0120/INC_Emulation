@@ -78,6 +78,7 @@ int switch_context_init(switch_context_t *ctx, int switch_id, int thread_pool_si
 
     // 初始化PSN管理
     memset(ctx->agg_epsn, 0, sizeof(ctx->agg_epsn));
+    memset(ctx->recv_epsn, 0, sizeof(ctx->recv_epsn));  // 初始化每个连接的期望接收PSN
     ctx->down_epsn = 0;
     // 初始化 latest_ack 为 -1，这样 PSN=0 的 ACK 才能被正确处理
     for (int i = 0; i < MAX_CONNECTIONS_NUM; i++) {
