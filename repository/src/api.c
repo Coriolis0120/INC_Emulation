@@ -618,6 +618,49 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
     struct ibv_sge receive_sge;      // 接收的Scatter-Gather元素
     struct ibv_recv_wr *receive_bad_wr;  // 用于返回失败的接收WR
 
+    // ===== 步骤1.5：等待控制消息确认 =====
+    // 提交一个接收请求等待下行控制确认
+    memset(&receive_sge, 0, sizeof(receive_sge));
+    receive_sge.addr = (uintptr_t)comm->receive_payload;
+    receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+    receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = 0xFFFFFFFF;  // 特殊 ID 标识控制消息
+    rr.sg_list = &receive_sge;
+    rr.num_sge = 1;
+
+    ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+
+    // 等待控制确认
+    struct ibv_wc ctrl_wc;
+    struct timeval ctrl_start, ctrl_now;
+    gettimeofday(&ctrl_start, NULL);
+
+    while(1) {
+        gettimeofday(&ctrl_now, NULL);
+        uint64_t elapsed = (ctrl_now.tv_sec - ctrl_start.tv_sec) * 1000000 +
+                          (ctrl_now.tv_usec - ctrl_start.tv_usec);
+        if(elapsed > POLL_TIMEOUT_US) {
+            printf("AllReduce: CTRL_TIMEOUT!\n");
+            fflush(stdout);
+            return;
+        }
+
+        int result = ibv_poll_cq(comm->cq, 1, &ctrl_wc);
+        if(result > 0) {
+            if(ctrl_wc.status == IBV_WC_SUCCESS &&
+               (ctrl_wc.opcode == IBV_WC_RECV || ctrl_wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                printf("AllReduce: Control confirmation received\n");
+                fflush(stdout);
+                break;
+            } else if(ctrl_wc.status == IBV_WC_SUCCESS && ctrl_wc.opcode == IBV_WC_SEND) {
+                continue;  // 发送完成，继续等待接收
+            }
+        }
+    }
+
     // ===== 步骤2：预先提交接收请求（滑动窗口） =====
     // 使用固定滑动窗口大小
     int window_size = SLIDING_WINDOW_SIZE < message_num ? SLIDING_WINDOW_SIZE : message_num;
@@ -981,6 +1024,47 @@ void inccl_reduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, u
     struct ibv_recv_wr rr;
     struct ibv_sge receive_sge;
     struct ibv_recv_wr *receive_bad_wr;
+
+    // ===== 步骤1.5：等待控制消息确认 =====
+    memset(&receive_sge, 0, sizeof(receive_sge));
+    receive_sge.addr = (uintptr_t)comm->receive_payload;
+    receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+    receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+    memset(&rr, 0, sizeof(rr));
+    rr.next = NULL;
+    rr.wr_id = 0xFFFFFFFF;
+    rr.sg_list = &receive_sge;
+    rr.num_sge = 1;
+
+    ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+
+    struct ibv_wc ctrl_wc;
+    struct timeval ctrl_start, ctrl_now;
+    gettimeofday(&ctrl_start, NULL);
+
+    while(1) {
+        gettimeofday(&ctrl_now, NULL);
+        uint64_t elapsed = (ctrl_now.tv_sec - ctrl_start.tv_sec) * 1000000 +
+                          (ctrl_now.tv_usec - ctrl_start.tv_usec);
+        if(elapsed > POLL_TIMEOUT_US) {
+            printf("Reduce: CTRL_TIMEOUT for rank %d!\n", my_rank);
+            fflush(stdout);
+            return;
+        }
+
+        int result = ibv_poll_cq(comm->cq, 1, &ctrl_wc);
+        if(result > 0) {
+            if(ctrl_wc.status == IBV_WC_SUCCESS &&
+               (ctrl_wc.opcode == IBV_WC_RECV || ctrl_wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                printf("Reduce: Control confirmation received for rank %d\n", my_rank);
+                fflush(stdout);
+                break;
+            } else if(ctrl_wc.status == IBV_WC_SUCCESS && ctrl_wc.opcode == IBV_WC_SEND) {
+                continue;
+            }
+        }
+    }
 
     // ===== 步骤2：仅root节点预先提交接收请求（使用滑动窗口） =====
     int window_size = SLIDING_WINDOW_SIZE < message_num ? SLIDING_WINDOW_SIZE : message_num;
@@ -1545,6 +1629,47 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
 
         send_control_message(comm, imm_data);
 
+        // 等待控制消息确认
+        memset(&receive_sge, 0, sizeof(receive_sge));
+        receive_sge.addr = (uintptr_t)comm->receive_payload;
+        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+        receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+        memset(&rr, 0, sizeof(rr));
+        rr.next = NULL;
+        rr.wr_id = 0xFFFFFFFF;
+        rr.sg_list = &receive_sge;
+        rr.num_sge = 1;
+
+        ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+
+        struct ibv_wc ctrl_wc;
+        struct timeval ctrl_start, ctrl_now;
+        gettimeofday(&ctrl_start, NULL);
+
+        while(1) {
+            gettimeofday(&ctrl_now, NULL);
+            uint64_t elapsed = (ctrl_now.tv_sec - ctrl_start.tv_sec) * 1000000 +
+                              (ctrl_now.tv_usec - ctrl_start.tv_usec);
+            if(elapsed > POLL_TIMEOUT_US) {
+                printf("Broadcast root: CTRL_TIMEOUT!\n");
+                fflush(stdout);
+                return;
+            }
+
+            int result = ibv_poll_cq(comm->cq, 1, &ctrl_wc);
+            if(result > 0) {
+                if(ctrl_wc.status == IBV_WC_SUCCESS &&
+                   (ctrl_wc.opcode == IBV_WC_RECV || ctrl_wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                    printf("Broadcast root: Control confirmation received\n");
+                    fflush(stdout);
+                    break;
+                } else if(ctrl_wc.status == IBV_WC_SUCCESS && ctrl_wc.opcode == IBV_WC_SEND) {
+                    continue;
+                }
+            }
+        }
+
         // 准备发送数据
         int32_t *send_buffer = (int32_t*)comm->send_payload;
         for(int i = 0; i < message_num; i++) {
@@ -1645,7 +1770,56 @@ void inccl_broadcast_sendrecv(struct inccl_communicator *comm, int32_t* data, ui
         free(wc);
 
     } else {
-        // ===== 非Root节点：只接收数据，不发送控制消息 =====
+        // ===== 非Root节点：发送控制消息，等待确认，然后接收数据 =====
+
+        // 发送控制消息（与 root 相同的 imm_data）
+        uint32_t imm_data = BUILD_IMM_DATA(root_rank, CTL_PRIMITIVE_BROADCAST, CTL_OPERATOR_SUM, CTL_DATATYPE_INT32);
+        printf("Rank %d: Non-root sending control message, imm_data=0x%08X\n", my_rank, imm_data);
+        fflush(stdout);
+
+        send_control_message(comm, imm_data);
+
+        // 等待控制消息确认
+        memset(&receive_sge, 0, sizeof(receive_sge));
+        receive_sge.addr = (uintptr_t)comm->receive_payload;
+        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+        receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+        memset(&rr, 0, sizeof(rr));
+        rr.next = NULL;
+        rr.wr_id = 0xFFFFFFFF;
+        rr.sg_list = &receive_sge;
+        rr.num_sge = 1;
+
+        ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+
+        struct ibv_wc ctrl_wc;
+        struct timeval ctrl_start, ctrl_now;
+        gettimeofday(&ctrl_start, NULL);
+
+        while(1) {
+            gettimeofday(&ctrl_now, NULL);
+            uint64_t elapsed = (ctrl_now.tv_sec - ctrl_start.tv_sec) * 1000000 +
+                              (ctrl_now.tv_usec - ctrl_start.tv_usec);
+            if(elapsed > POLL_TIMEOUT_US) {
+                printf("Broadcast non-root %d: CTRL_TIMEOUT!\n", my_rank);
+                fflush(stdout);
+                return;
+            }
+
+            int result = ibv_poll_cq(comm->cq, 1, &ctrl_wc);
+            if(result > 0) {
+                if(ctrl_wc.status == IBV_WC_SUCCESS &&
+                   (ctrl_wc.opcode == IBV_WC_RECV || ctrl_wc.opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                    printf("Broadcast non-root %d: Control confirmation received\n", my_rank);
+                    fflush(stdout);
+                    break;
+                } else if(ctrl_wc.status == IBV_WC_SUCCESS && ctrl_wc.opcode == IBV_WC_SEND) {
+                    continue;
+                }
+            }
+        }
+
         printf("Rank %d: Non-root, waiting to receive broadcast from root %d\n", my_rank, root_rank);
         fflush(stdout);
 
@@ -1771,7 +1945,7 @@ void inccl_barrier(struct inccl_communicator *comm) {
     fflush(stdout);
 
     // 发送控制消息
-    uint32_t imm_data = BUILD_IMM_DATA(CTL_DEST_RANK_ALL, CTL_PRIMITIVE_BARRIER, CTL_OPERATOR_BARRIER, CTL_DATATYPE_INT32);
+    uint32_t imm_data = BUILD_IMM_DATA_EXT(CTL_DEST_RANK_ALL, CTL_EXT_BARRIER, CTL_OPERATOR_BARRIER, CTL_DATATYPE_INT32);
     printf("Rank %d: Sending barrier control message, imm_data=0x%08X\n", my_rank, imm_data);
     fflush(stdout);
 
@@ -1835,5 +2009,67 @@ void inccl_barrier(struct inccl_communicator *comm) {
     }
 
     printf("Rank %d: Barrier completed\n", my_rank);
+    fflush(stdout);
+}
+
+/**
+ * ReduceScatter 操作
+ * 所有节点的数据先聚合（Reduce），然后将结果分散（Scatter）到各节点
+ * 每个节点接收聚合结果的 1/world_size 部分
+ *
+ * 实现方式：使用 world_size 次 Reduce 操作
+ * - 第 i 次 Reduce：对数据的第 i 块执行 Reduce，root_rank = i
+ * - 这样 rank i 获得第 i 块的聚合结果
+ *
+ * 参数：
+ * - comm: 通信器
+ * - src_data: 源数据（每个节点提供 len 个元素）
+ * - len: 总数据元素数（必须能被 world_size 整除）
+ * - dst_data: 目标缓冲区（每个节点接收 len/world_size 个元素）
+ */
+void inccl_reducescatter(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data) {
+    int my_rank = comm->group->rank;
+    int world_size = comm->group->world_size;
+
+    // 每个 rank 接收的元素数
+    uint32_t chunk_size = len / world_size;
+
+    printf("[ReduceScatter] Rank %d: Starting, len=%u, world_size=%d, chunk_size=%u\n",
+           my_rank, len, world_size, chunk_size);
+    printf("[ReduceScatter] Rank %d: Using %d Reduce operations\n", my_rank, world_size);
+    fflush(stdout);
+
+    // 为每次 Reduce 分配临时缓冲区
+    int32_t *temp_dst = (int32_t*)malloc(chunk_size * sizeof(int32_t));
+    if (!temp_dst) {
+        printf("[ReduceScatter] Rank %d: Failed to allocate temp buffer\n", my_rank);
+        return;
+    }
+
+    // 执行 world_size 次 Reduce 操作，每次之间用 Barrier 同步
+    for (int i = 0; i < world_size; i++) {
+        // 第 i 次 Reduce：对数据的第 i 块执行 Reduce，root_rank = i
+        int32_t *chunk_src = src_data + i * chunk_size;
+
+        printf("[ReduceScatter] Rank %d: Reduce %d/%d, root=%d, chunk_offset=%u\n",
+               my_rank, i + 1, world_size, i, i * chunk_size);
+        fflush(stdout);
+
+        // 执行 Reduce 操作
+        inccl_reduce_sendrecv(comm, chunk_src, chunk_size, temp_dst, i);
+
+        // 如果我是这次 Reduce 的 root，将结果复制到 dst_data
+        if (my_rank == i) {
+            memcpy(dst_data, temp_dst, chunk_size * sizeof(int32_t));
+            printf("[ReduceScatter] Rank %d: Received my chunk (first 5: %d, %d, %d, %d, %d)\n",
+                   my_rank, dst_data[0], dst_data[1], dst_data[2], dst_data[3], dst_data[4]);
+            fflush(stdout);
+        }
+
+        // 不需要 Barrier：每次 Reduce 的控制消息已经通过"向上聚合 + 向下广播"机制同步了所有节点
+    }
+
+    free(temp_dst);
+    printf("[ReduceScatter] Rank %d: Completed\n", my_rank);
     fflush(stdout);
 }

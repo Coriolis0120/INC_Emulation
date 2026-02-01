@@ -91,6 +91,10 @@ static int parse_connections(switch_context_t *ctx, const YAML::Node& connection
         // 如果对端是主机，建立 rank_to_conn 映射
         if (!is_switch && peer_id >= 0 && peer_id < MAX_RANKS) {
             ctx->rank_to_conn[peer_id] = conn_id;
+            // 记录本地 Host 连接（用于 ReduceScatter 分散）
+            if (host_conn_count < MAX_CONNECTIONS_NUM) {
+                ctx->host_conns[host_conn_count] = conn_id;
+            }
             host_conn_count++;  // 统计主机连接数
         }
 
@@ -102,7 +106,14 @@ static int parse_connections(switch_context_t *ctx, const YAML::Node& connection
 
     ctx->fan_in = conn_idx;
     ctx->host_fan_in = host_conn_count;  // 设置主机连接数
+    ctx->host_count = host_conn_count;   // 设置本地 Host 数量
     printf("[YAML] Total connections parsed: %d (host: %d)\n", conn_idx, host_conn_count);
+    // 打印 host_conns 数组
+    printf("[YAML] host_conns: ");
+    for (int i = 0; i < host_conn_count; i++) {
+        printf("%d ", ctx->host_conns[i]);
+    }
+    printf("\n");
     return 0;
 }
 

@@ -18,8 +18,10 @@ int match_rule(rule_t* rule, uint32_t src_ip, uint32_t dst_ip,
     if (rule->primitive != primitive) {
         return 0;
     }
-    // AllReduce 不需要匹配 primitive_param
-    if (primitive == PRIMITIVE_TYPE_ALLREDUCE) {
+    // AllReduce, Barrier, ReduceScatter 不需要匹配 primitive_param
+    if (primitive == PRIMITIVE_TYPE_ALLREDUCE ||
+        primitive == PRIMITIVE_TYPE_BARRIER ||
+        primitive == PRIMITIVE_TYPE_REDUCESCATTER) {
         return 1;
     }
     // Reduce/Broadcast 需要匹配 primitive_param

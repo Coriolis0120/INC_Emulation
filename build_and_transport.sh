@@ -17,6 +17,7 @@ cmake --build . --target host_simple_test
 cmake --build . --target host_reduce
 cmake --build . --target host_broadcast
 cmake --build . --target host_barrier
+cmake --build . --target host_reducescatter
 
 cd /root/NetLab/new/INC_Emulation
 
@@ -45,30 +46,34 @@ rsync -av repository/build/switch_v2 vm2:/root/
 
 # Host programs to pku1-4
 echo "[5/7] Deploying to pku1..."
-ssh pku1 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier"
+ssh pku1 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier /root/host_reducescatter"
 rsync -av repository/build/host_simple_test pku1:/root/
 rsync -av repository/build/host_reduce pku1:/root/
 rsync -av repository/build/host_broadcast pku1:/root/
 rsync -av repository/build/host_barrier pku1:/root/
+rsync -av repository/build/host_reducescatter pku1:/root/
 
 echo "[6/7] Deploying to pku2..."
-ssh pku2 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier"
+ssh pku2 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier /root/host_reducescatter"
 rsync -av repository/build/host_simple_test pku2:/root/
 rsync -av repository/build/host_reduce pku2:/root/
 rsync -av repository/build/host_broadcast pku2:/root/
 rsync -av repository/build/host_barrier pku2:/root/
+rsync -av repository/build/host_reducescatter pku2:/root/
 
 echo "[7/7] Deploying to pku3 and pku4..."
-ssh pku3 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier"
+ssh pku3 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier /root/host_reducescatter"
 rsync -av repository/build/host_simple_test pku3:/root/
 rsync -av repository/build/host_reduce pku3:/root/
 rsync -av repository/build/host_broadcast pku3:/root/
 rsync -av repository/build/host_barrier pku3:/root/
-ssh pku4 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier"
+rsync -av repository/build/host_reducescatter pku3:/root/
+ssh pku4 "rm -f /root/host_simple_test /root/host_reduce /root/host_broadcast /root/host_barrier /root/host_reducescatter"
 rsync -av repository/build/host_simple_test pku4:/root/
 rsync -av repository/build/host_reduce pku4:/root/
 rsync -av repository/build/host_broadcast pku4:/root/
 rsync -av repository/build/host_barrier pku4:/root/
+rsync -av repository/build/host_reducescatter pku4:/root/
 
 echo ""
 echo "=== Build and transport completed ==="

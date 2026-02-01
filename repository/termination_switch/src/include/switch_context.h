@@ -124,6 +124,8 @@ typedef struct {
     int fan_in;                     // 动态扇入 (不再硬编码FAN_IN)
     int host_fan_in;                // 主机连接数（用于叶子交换机聚合判断）
     int is_root;                    // 替代全局 root
+    int host_count;                 // 本地 Host 数量（用于 ReduceScatter 分散）
+    int host_conns[MAX_CONNECTIONS_NUM];  // 本地 Host 连接 ID 列表
 
     // === PSN 管理 ===
     int agg_epsn[MAX_CONNECTIONS_NUM];           // 期望的上行PSN
@@ -138,14 +140,19 @@ typedef struct {
     // === 路由和映射 ===
     rule_table_t routing_table;     // 替代全局 table
     int rank_to_conn[MAX_RANKS];    // 替代全局 rank_to_conn
-    
+
     // === 元数据 (跨PSN共享) ===
     primitive_type_t operation_type; // 替代 current_operation_type
     int root_rank;                   // 替代 current_root_rank
     int ctrl_psn;                    // 当前操作的控制消息 PSN（用于计算相对 PSN）
     int ctrl_forwarded;              // 控制包是否已转发给父交换机（0=未转发，1=已转发）
     pthread_mutex_t meta_mutex;      // 保护元数据访问
-    
+
+    // === 控制消息聚合 ===
+    int ctrl_agg_count;              // 已收到的控制消息数量
+    uint32_t ctrl_imm_data;          // 控制消息的 Immediate Data（用于转发）
+    pthread_mutex_t ctrl_agg_mutex;  // 保护控制消息聚合
+
     // === 资源 ===
     threadpool thpool;               // 替代全局 thpool
     int switch_id;                   // 交换机ID

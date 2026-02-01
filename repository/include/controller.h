@@ -552,6 +552,71 @@ struct controller_communicator{
     }
 
     /**
+     * @brief 生成 ReduceScatter 规则
+     */
+    void generate_reducescatter_rules() {
+        for (int sw_id = 0; sw_id < TOPOLOGY_SIZE; sw_id++) {
+            auto& sw = switches[sw_id];
+            std::vector<int> host_conns = get_host_conns(sw_id);
+            std::vector<int> switch_conns = get_switch_conns(sw_id);
+
+            if (sw.is_root) {
+                for (auto& conn : sw.connections) {
+                    if (!conn.is_switch) continue;
+
+                    RuleConfig rule;
+                    rule.src_ip = conn.peer_ip;
+                    rule.dst_ip = conn.my_ip;
+                    rule.primitive = 5;  // REDUCESCATTER
+                    rule.primitive_param = -1;
+                    rule.conn_id = conn.conn_id;
+                    rule.direction = 0;
+                    rule.root = true;
+                    rule.ack_conn = conn.conn_id;
+                    rule.out_conns = switch_conns;
+
+                    sw.rules.push_back(rule);
+                }
+            } else {
+                int parent_conn = get_parent_conn(sw_id);
+
+                for (auto& conn : sw.connections) {
+                    if (conn.is_switch) continue;
+
+                    RuleConfig rule;
+                    rule.src_ip = conn.peer_ip;
+                    rule.dst_ip = conn.my_ip;
+                    rule.primitive = 5;  // REDUCESCATTER
+                    rule.primitive_param = -1;
+                    rule.conn_id = conn.conn_id;
+                    rule.direction = 0;
+                    rule.root = false;
+                    rule.ack_conn = conn.conn_id;
+                    rule.out_conns = {parent_conn};
+
+                    sw.rules.push_back(rule);
+                }
+
+                if (parent_conn >= 0) {
+                    auto& pconn = sw.connections[parent_conn];
+                    RuleConfig rule;
+                    rule.src_ip = pconn.peer_ip;
+                    rule.dst_ip = pconn.my_ip;
+                    rule.primitive = 5;  // REDUCESCATTER
+                    rule.primitive_param = -1;
+                    rule.conn_id = parent_conn;
+                    rule.direction = 1;
+                    rule.root = false;
+                    rule.ack_conn = parent_conn;
+                    rule.out_conns = host_conns;
+
+                    sw.rules.push_back(rule);
+                }
+            }
+        }
+    }
+
+    /**
      * @brief 计算路由并生成规则
      *
      * 1. 初始化 connections
@@ -712,6 +777,9 @@ struct controller_communicator{
 
         generate_barrier_rules();
         printf("[Controller] Barrier rules generated\n");
+
+        generate_reducescatter_rules();
+        printf("[Controller] ReduceScatter rules generated\n");
 
         // 4) 生成 YAML
         generate_yaml();

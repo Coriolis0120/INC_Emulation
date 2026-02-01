@@ -98,6 +98,11 @@ int switch_context_init(switch_context_t *ctx, int switch_id, int thread_pool_si
     ctx->ctrl_forwarded = 0;  // 初始化为 0，表示控制包未转发
     pthread_mutex_init(&ctx->meta_mutex, NULL);
 
+    // 初始化控制消息聚合
+    ctx->ctrl_agg_count = 0;
+    ctx->ctrl_imm_data = 0;
+    pthread_mutex_init(&ctx->ctrl_agg_mutex, NULL);
+
     // 初始化控制器通信
     ctx->controller_fd = -1;
     ctx->state = SWITCH_STATE_INIT;

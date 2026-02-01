@@ -13,18 +13,24 @@ typedef enum {
     PRIMITIVE_TYPE_ALLREDUCE = 1,
     PRIMITIVE_TYPE_REDUCE = 2,
     PRIMITIVE_TYPE_BROADCAST = 3,
-    PRIMITIVE_TYPE_BARRIER = 4
+    PRIMITIVE_TYPE_BARRIER = 4,
+    PRIMITIVE_TYPE_REDUCESCATTER = 5
 } primitive_type_t;
 
 // ==================== 控制包协议定义 ====================
 // 使用 RDMA Send with Immediate 的 32-bit immediate data 传递元数据
-// 格式: [Destination Rank: 16 bits][Primitive: 2 bits][Operator: 2 bits][Data Type: 4 bits][Reserved: 8 bits]
+// 格式: [Destination Rank: 16 bits][Primitive: 2 bits][Operator: 2 bits][Data Type: 4 bits][Extended Primitive: 4 bits][Reserved: 4 bits]
+// 当 Primitive == 0x03 时，使用 Extended Primitive 字段区分 Barrier/ReduceScatter 等
 
-// Primitive 类型 (2 bits)
+// Primitive 类型 (2 bits) - 基础类型
 #define CTL_PRIMITIVE_ALLREDUCE  0x00  // 00
 #define CTL_PRIMITIVE_REDUCE     0x01  // 01
 #define CTL_PRIMITIVE_BROADCAST  0x02  // 10
-#define CTL_PRIMITIVE_BARRIER    0x03  // 11
+#define CTL_PRIMITIVE_EXTENDED   0x03  // 11 - 扩展类型，查看 Extended Primitive 字段
+
+// Extended Primitive 类型 (4 bits) - 当 Primitive == 0x03 时使用
+#define CTL_EXT_BARRIER          0x00  // 0000 - Barrier
+#define CTL_EXT_REDUCESCATTER    0x01  // 0001 - ReduceScatter
 
 // Operator 类型 (2 bits)
 #define CTL_OPERATOR_BARRIER     0x00  // 00
@@ -40,18 +46,27 @@ typedef enum {
 #define CTL_DEST_RANK_ALL        0xFFFF  // AllReduce/Broadcast 使用
 
 // Immediate Data 构建宏
-// 格式: [dest_rank:16][primitive:2][operator:2][datatype:4][reserved:8]
+// 格式: [dest_rank:16][primitive:2][operator:2][datatype:4][ext_prim:4][reserved:4]
 #define BUILD_IMM_DATA(dest_rank, primitive, operator, datatype) \
     ((((uint32_t)(dest_rank) & 0xFFFF) << 16) | \
      (((uint32_t)(primitive) & 0x03) << 14) | \
      (((uint32_t)(operator) & 0x03) << 12) | \
      (((uint32_t)(datatype) & 0x0F) << 8))
 
+// 扩展原语的 Immediate Data 构建宏
+#define BUILD_IMM_DATA_EXT(dest_rank, ext_prim, operator, datatype) \
+    ((((uint32_t)(dest_rank) & 0xFFFF) << 16) | \
+     (((uint32_t)CTL_PRIMITIVE_EXTENDED & 0x03) << 14) | \
+     (((uint32_t)(operator) & 0x03) << 12) | \
+     (((uint32_t)(datatype) & 0x0F) << 8) | \
+     (((uint32_t)(ext_prim) & 0x0F) << 4))
+
 // Immediate Data 解析宏
 #define GET_IMM_DEST_RANK(imm)   (((imm) >> 16) & 0xFFFF)
 #define GET_IMM_PRIMITIVE(imm)   (((imm) >> 14) & 0x03)
 #define GET_IMM_OPERATOR(imm)    (((imm) >> 12) & 0x03)
 #define GET_IMM_DATATYPE(imm)    (((imm) >> 8) & 0x0F)
+#define GET_IMM_EXT_PRIM(imm)    (((imm) >> 4) & 0x0F)
 
 // RDMA opcode 定义
 #define RDMA_OPCODE_SEND_ONLY           0x04

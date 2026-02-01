@@ -1,9 +1,9 @@
 #!/bin/bash
 # INC Test Script - 1-2-4 Topology
-# Supports AllReduce, Reduce, Broadcast, and Barrier
+# Supports AllReduce, Reduce, Broadcast, Barrier, and ReduceScatter
 
 # 参数: TEST_TYPE DATA_COUNT
-# TEST_TYPE: allreduce (默认), reduce, broadcast, barrier
+# TEST_TYPE: allreduce (默认), reduce, broadcast, barrier, reducescatter
 TEST_TYPE=${1:-allreduce}
 DATA_COUNT=${2:-8192}
 
@@ -71,7 +71,9 @@ if [ "$TEST_TYPE" = "reduce" ]; then
 elif [ "$TEST_TYPE" = "broadcast" ]; then
     ssh pku1 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_broadcast $WORLD_SIZE $MASTER_IP 0 0 $DATA_COUNT > /root/host.log 2>&1" &
 elif [ "$TEST_TYPE" = "barrier" ]; then
-    ssh pku1 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 0 > /root/host.log 2>&1" &
+    ssh pku1 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 0 $DATA_COUNT > /root/host.log 2>&1" &
+elif [ "$TEST_TYPE" = "reducescatter" ]; then
+    ssh pku1 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_reducescatter $WORLD_SIZE $MASTER_IP 0 $DATA_COUNT > /root/host.log 2>&1" &
 else
     ssh pku1 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_simple_test $WORLD_SIZE $MASTER_IP 0 $DATA_COUNT > /root/host.log 2>&1" &
 fi
@@ -84,7 +86,9 @@ if [ "$TEST_TYPE" = "reduce" ]; then
 elif [ "$TEST_TYPE" = "broadcast" ]; then
     ssh pku2 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_broadcast $WORLD_SIZE $MASTER_IP 1 0 $DATA_COUNT > /root/host.log 2>&1" &
 elif [ "$TEST_TYPE" = "barrier" ]; then
-    ssh pku2 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 1 > /root/host.log 2>&1" &
+    ssh pku2 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 1 $DATA_COUNT > /root/host.log 2>&1" &
+elif [ "$TEST_TYPE" = "reducescatter" ]; then
+    ssh pku2 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_reducescatter $WORLD_SIZE $MASTER_IP 1 $DATA_COUNT > /root/host.log 2>&1" &
 else
     ssh pku2 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_simple_test $WORLD_SIZE $MASTER_IP 1 $DATA_COUNT > /root/host.log 2>&1" &
 fi
@@ -99,8 +103,11 @@ elif [ "$TEST_TYPE" = "broadcast" ]; then
     ssh pku3 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_broadcast $WORLD_SIZE $MASTER_IP 2 0 $DATA_COUNT > /root/host.log 2>&1" &
     ssh pku4 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_broadcast $WORLD_SIZE $MASTER_IP 3 0 $DATA_COUNT > /root/host.log 2>&1" &
 elif [ "$TEST_TYPE" = "barrier" ]; then
-    ssh pku3 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 2 > /root/host.log 2>&1" &
-    ssh pku4 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 3 > /root/host.log 2>&1" &
+    ssh pku3 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 2 $DATA_COUNT > /root/host.log 2>&1" &
+    ssh pku4 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_barrier $WORLD_SIZE $MASTER_IP 3 $DATA_COUNT > /root/host.log 2>&1" &
+elif [ "$TEST_TYPE" = "reducescatter" ]; then
+    ssh pku3 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_reducescatter $WORLD_SIZE $MASTER_IP 2 $DATA_COUNT > /root/host.log 2>&1" &
+    ssh pku4 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_reducescatter $WORLD_SIZE $MASTER_IP 3 $DATA_COUNT > /root/host.log 2>&1" &
 else
     ssh pku3 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_simple_test $WORLD_SIZE $MASTER_IP 2 $DATA_COUNT > /root/host.log 2>&1" &
     ssh pku4 "cd /root && export CONTROLLER_IP='$CONTROLLER_IP' && stdbuf -oL ./host_simple_test $WORLD_SIZE $MASTER_IP 3 $DATA_COUNT > /root/host.log 2>&1" &
@@ -110,7 +117,7 @@ echo ""
 echo "=== Waiting for completion ==="
 
 # 轮询检测测试是否完成
-MAX_WAIT=20
+MAX_WAIT=60
 ELAPSED=0
 while [ $ELAPSED -lt $MAX_WAIT ]; do
     sleep 2
