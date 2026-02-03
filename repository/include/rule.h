@@ -40,6 +40,8 @@ typedef struct {
 
     // 转发信息
     connection_t *ack_conn;       // ACK 发给谁 (入连接)
+    int in_conns[MAX_PORT_NUM];   // 需要聚合的输入连接 ID 列表
+    int in_conns_cnt;             // in_conns 数量 (即 expected_degree)
     connection_t *out_conns[MAX_PORT_NUM];  // 转发给谁
     int out_conns_cnt;            // out_conns 数量
 } rule_t;

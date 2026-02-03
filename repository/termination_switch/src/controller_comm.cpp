@@ -153,6 +153,21 @@ static int parse_rules(switch_context_t *ctx, const YAML::Node& rules) {
             rule.ack_conn = &ctx->conns[ack_conn_id];
         }
 
+        // 解析 in_conns 数组 (需要聚合的输入连接)
+        rule.in_conns_cnt = 0;
+        if (rule_node["in_conns"] && rule_node["in_conns"].IsSequence()) {
+            int in_idx = 0;
+            for (const auto& in_conn : rule_node["in_conns"]) {
+                if (in_idx >= MAX_PORT_NUM) break;
+                int conn_id = in_conn.as<int>(-1);
+                if (conn_id >= 0 && conn_id < MAX_CONNECTIONS_NUM) {
+                    rule.in_conns[in_idx] = conn_id;
+                    in_idx++;
+                }
+            }
+            rule.in_conns_cnt = in_idx;
+        }
+
         // 解析 out_conns 数组
         if (rule_node["out_conns"] && rule_node["out_conns"].IsSequence()) {
             int out_idx = 0;
@@ -170,11 +185,11 @@ static int parse_rules(switch_context_t *ctx, const YAML::Node& rules) {
         // 添加到路由表
         ctx->routing_table.rules[ctx->routing_table.count] = rule;
 
-        printf("[YAML] Rule %d: %s -> %s, primitive=%d, param=%d, dir=%s, root=%d, out_cnt=%d\n",
+        printf("[YAML] Rule %d: %s -> %s, primitive=%d, param=%d, dir=%s, root=%d, in_cnt=%d, out_cnt=%d\n",
                ctx->routing_table.count, src_ip.c_str(), dst_ip.c_str(),
                rule.primitive, rule.primitive_param,
                rule.direction == DIR_UP ? "UP" : "DOWN",
-               rule.root, rule.out_conns_cnt);
+               rule.root, rule.in_conns_cnt, rule.out_conns_cnt);
 
         ctx->routing_table.count++;
     }

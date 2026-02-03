@@ -31,7 +31,7 @@
 #define Idx(psn) ((psn) % SWITCH_ARRAY_LENGTH)
 
 // 调试开关：设为 0 可禁用详细日志以提高性能
-#define DEBUG_VERBOSE 0
+#define DEBUG_VERBOSE 1
 
 // 重传相关参数
 #define RETRANSMIT_TIMEOUT_US 2000000   // 2s 超时
@@ -70,6 +70,19 @@ typedef struct {
 // 定期输出宏：每隔 PROGRESS_INTERVAL 个 PSN 输出一次
 #define PROGRESS_INTERVAL 1000
 #define PROGRESS_PRINT(psn, ...) do { if ((psn) % PROGRESS_INTERVAL == 0) { TS_PRINTF(__VA_ARGS__); fflush(stdout); } } while(0)
+
+/**
+ * @brief 检查 conn_id 是否在规则的 in_conns 列表中
+ * @return 1 如果在列表中（应该参与聚合），0 如果不在（应该下行转发）
+ */
+static inline int is_in_conn(rule_t *rule, int conn_id) {
+    for (int i = 0; i < rule->in_conns_cnt; i++) {
+        if (rule->in_conns[i] == conn_id) {
+            return 1;
+        }
+    }
+    return 0;
+}
 
 // 注意：使用 util.h 中定义的 packet_type_t 枚举
 // PACKET_TYPE_DATA = 0
@@ -443,8 +456,8 @@ static void handle_broadcast(switch_context_t *ctx, rule_t *rule, int conn_id, u
     int sw_id = ctx->switch_id;
     int root_rank = ctx->root_rank;
 
-    DBG_PRINT("[SW%d] handle_broadcast: from conn %d, root_rank=%d, PSN=%u, len=%d\n",
-           sw_id, conn_id, root_rank, psn, len);
+    DBG_PRINT("[SW%d] handle_broadcast: from conn %d, root_rank=%d, PSN=%u, len=%d, out_cnt=%d\n",
+           sw_id, conn_id, root_rank, psn, len, rule->out_conns_cnt);
 
     // 使用 down_epsn 作为统一的广播 PSN（用于重传索引）
     uint32_t bcast_psn = ctx->down_epsn;
@@ -466,21 +479,18 @@ static void handle_broadcast(switch_context_t *ctx, rule_t *rule, int conn_id, u
 
     int send_opcode = strip_immediate_opcode(packet_type);
 
-    // 广播到所有非 sender 节点
-    for (int i = 0; i < ctx->fan_in; i++) {
-        if (i == conn_id) {
-            DBG_PRINT("[SW%d] Broadcast: skip sender conn %d\n", sw_id, i);
-            continue;
-        }
+    // 按规则中的 out_conns 广播
+    for (int i = 0; i < rule->out_conns_cnt; i++) {
+        connection_t *conn = rule->out_conns[i];
+        int out_conn_id = conn - ctx->conns;  // 指针转索引
 
-        connection_t *conn = &ctx->conns[i];
-        uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[i], 1);
+        uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[out_conn_id], 1);
 
         // 记录 send_psn -> bcast_psn 的映射，用于 ACK 处理和重传
-        ctx->send_to_bcast[i][send_psn % SWITCH_ARRAY_LENGTH] = bcast_psn;
+        ctx->send_to_bcast[out_conn_id][send_psn % SWITCH_ARRAY_LENGTH] = bcast_psn;
 
         DBG_PRINT("[SW%d] Broadcast: to conn %d, recv_PSN=%u, send_PSN=%u, bcast_PSN=%u\n",
-               sw_id, i, psn, send_psn, bcast_psn);
+               sw_id, out_conn_id, psn, send_psn, bcast_psn);
         send_packet_async(conn, PACKET_TYPE_DATA, data, len, send_psn, send_opcode);
     }
 
@@ -592,8 +602,8 @@ static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t 
     state->degree++;
 
     int degree = state->degree;
-    // 叶子交换机只需要聚合主机连接的数据，根交换机需要聚合所有子交换机的数据
-    int expected_degree = ctx->is_root ? ctx->fan_in : ctx->host_fan_in;
+    // 使用规则中的 in_conns_cnt 作为期望聚合次数
+    int expected_degree = rule->in_conns_cnt;
 
     // 打印聚合后的 degree
     TS_PRINTF("[SW%d] AGG_DEGREE: %d/%d, PSN=%u\n",
@@ -604,12 +614,12 @@ static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t 
 
     // 检查是否聚合完成
     if (degree == expected_degree) {
-        TS_PRINTF("[SW%d] AGG_COMPLETE: PSN=%u, op=%s, is_root=%d\n",
-               sw_id, psn, op_str, ctx->is_root);
+        TS_PRINTF("[SW%d] AGG_COMPLETE: PSN=%u, op=%s, rule_root=%d\n",
+               sw_id, psn, op_str, rule->root);
         fflush(stdout);
 
-        if (ctx->is_root) {
-            // 根交换机：根据操作类型处理
+        if (rule->root) {
+            // 规则中标记为 root：根据操作类型处理
             if (op_type == PRIMITIVE_TYPE_ALLREDUCE) {
                 // AllReduce: 广播到所有子节点
                 cache_and_broadcast(ctx, rule, psn, state->agg_buffer.buffer, len, packet_type);
@@ -622,39 +632,11 @@ static int aggregate(switch_context_t *ctx, rule_t *rule, int conn_id, uint32_t 
                 pthread_mutex_unlock(&state->mutex);
 
             } else if (op_type == PRIMITIVE_TYPE_REDUCE) {
-                // Reduce: 发送到 root_rank 所在的连接
-                // 对于根交换机（Spine），使用 rule->out_conns[0]（指向包含 root_rank 的 Leaf）
-                // 对于叶子交换机，使用 rank_to_conn[root_rank]（直接连接到 host）
-                int target_conn = -1;
-                if (rule->out_conns_cnt > 0) {
-                    // 使用路由规则中的 out_conns（适用于 Spine）
-                    target_conn = rule->out_conns[0] - ctx->conns;  // 指针转索引
-                    // 验证指针有效性
-                    if (target_conn < 0 || target_conn >= ctx->fan_in) {
-                        target_conn = -1;
-                    }
-                }
-                if (target_conn < 0) {
-                    // 回退到 rank_to_conn（适用于直接连接 host 的 Leaf）
-                    target_conn = ctx->rank_to_conn[root_rank];
-                }
-                DBG_PRINT("[SW%d] Reduce: root_rank=%d, target_conn=%d\n",
-                       sw_id, root_rank, target_conn);
+                // Reduce: 通过 cache_and_broadcast 发送到 out_conns（可能是 1 个或多个）
+                // 这样可以统一处理缓存、ACK 和槽位清理
+                cache_and_broadcast(ctx, rule, psn, state->agg_buffer.buffer, len, packet_type);
 
-                if (target_conn >= 0 && target_conn < ctx->fan_in) {
-                    uint32_t send_psn = __sync_fetch_and_add(&ctx->send_psn[target_conn], 1);
-                    DBG_PRINT("[SW%d] Reduce: send to conn %d, recv_PSN=%u, send_PSN=%u\n",
-                           sw_id, target_conn, psn, send_psn);
-
-                    connection_t *conn = &ctx->conns[target_conn];
-                    int send_opcode = strip_immediate_opcode(packet_type);
-                    send_packet_async(conn, PACKET_TYPE_DATA, state->agg_buffer.buffer, len, send_psn, send_opcode);
-                } else {
-                    fprintf(stderr, "[SW%d] ERROR: Invalid target_conn=%d for root_rank=%d\n",
-                            sw_id, target_conn, root_rank);
-                }
-
-                // 清理聚合缓冲区
+                // 清理聚合缓冲区（bcast_buffer 会在收到 ACK 后清理）
                 pthread_mutex_lock(&state->mutex);
                 state->degree = 0;
                 memset(state->arrival, 0, sizeof(state->arrival));
@@ -1217,8 +1199,9 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
 
         DBG_PRINT("[SW%d] DATA: len=%d bytes\n", sw_id, data_len);
 
-        if (rule->direction == DIR_DOWN) {
-            // 下行数据：缓存并广播
+        // 判断是否参与聚合：检查 conn_id 是否在 in_conns 列表中
+        if (!is_in_conn(rule, conn_id)) {
+            // conn_id 不在 in_conns 中：下行数据，缓存并广播
             // 使用 recv_epsn[conn_id] 跟踪从该连接期望接收的 PSN
             int recv_epsn = ctx->recv_epsn[conn_id];
             TS_PRINTF("[SW%d] DOWN_DATA: conn=%d, PSN=%u, ePSN=%d, len=%d\n",
@@ -1247,7 +1230,7 @@ static void process_packet(switch_context_t *ctx, queued_packet_t *pkt) {
                 cache_and_broadcast(ctx, rule, psn, data, data_len, opcode);
             }
         } else {
-            // 上行数据：聚合
+            // conn_id 在 in_conns 中：上行数据，参与聚合
             TS_PRINTF("[SW%d] UP_DATA: conn=%d, PSN=%u, ePSN=%d, len=%d\n",
                    sw_id, conn_id, psn, ctx->agg_epsn[conn_id], data_len);
             fflush(stdout);

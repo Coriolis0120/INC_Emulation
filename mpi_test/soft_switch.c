@@ -28,6 +28,30 @@
 // 最大路由条目数
 #define MAX_ROUTES 16
 
+// CRC32 查找表 (用于模拟 ICRC 计算)
+static uint32_t crc32_table[256];
+static int crc32_table_init = 0;
+
+static void init_crc32_table(void) {
+    if (crc32_table_init) return;
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (int j = 0; j < 8; j++) {
+            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+        }
+        crc32_table[i] = crc;
+    }
+    crc32_table_init = 1;
+}
+
+static uint32_t compute_crc32(const uint8_t *data, int len) {
+    uint32_t crc = 0xFFFFFFFF;
+    for (int i = 0; i < len; i++) {
+        crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
+    }
+    return crc ^ 0xFFFFFFFF;
+}
+
 // 路由条目
 typedef struct {
     uint32_t network;      // 网络地址
@@ -147,6 +171,11 @@ static void forward_packet(int in_port, const uint8_t *packet, int len) {
         return;
     }
 
+    // 跳过超过 MTU 的包（可能是 TSO 大包）
+    if (len > 1500) {
+        return;
+    }
+
     struct ether_header *eth = (struct ether_header *)packet;
 
     // 只处理 IP 包
@@ -156,10 +185,17 @@ static void forward_packet(int in_port, const uint8_t *packet, int len) {
 
     struct iphdr *ip = (struct iphdr *)(packet + ETH_HLEN);
     uint32_t dst_ip = ip->daddr;
+    uint32_t src_ip = ip->saddr;
 
     // 查找路由
     route_entry_t *route = lookup_route(dst_ip);
     if (!route) {
+        // 调试：打印无路由的包
+        char src_str[INET_ADDRSTRLEN], dst_str[INET_ADDRSTRLEN];
+        inet_ntop(AF_INET, &src_ip, src_str, sizeof(src_str));
+        inet_ntop(AF_INET, &dst_ip, dst_str, sizeof(dst_str));
+        printf("[DEBUG] No route for %s -> %s (port %d)\n", src_str, dst_str, in_port);
+        fflush(stdout);
         return;  // 无路由，丢弃
     }
 
@@ -177,6 +213,13 @@ static void forward_packet(int in_port, const uint8_t *packet, int len) {
     struct ether_header *new_eth = (struct ether_header *)new_packet;
     memcpy(new_eth->ether_dhost, route->next_hop_mac, 6);
     memcpy(new_eth->ether_shost, g_ctx.ports[out_port].mac, 6);
+
+    // 模拟 ICRC 计算 (从 UDP payload 开始，即 ETH+IP+UDP 头之后)
+    // ETH(14) + IP(20) + UDP(8) = 42 bytes
+    if (len > 42) {
+        volatile uint32_t icrc = compute_crc32(new_packet + 42, len - 42);
+        (void)icrc;  // 防止编译器优化掉
+    }
 
     // 发送
     if (pcap_sendpacket(g_ctx.ports[out_port].handle, new_packet, len) != 0) {
@@ -227,6 +270,7 @@ static void *stats_thread(void *arg) {
         sleep(5);
         printf("[Stats] Port0: recv=%lu fwd=%lu | Port1: recv=%lu fwd=%lu\n",
                pkt_count[0], fwd_count[0], pkt_count[1], fwd_count[1]);
+        fflush(stdout);
     }
     return NULL;
 }
@@ -274,6 +318,9 @@ int main(int argc, char *argv[]) {
     // 禁用输出缓冲
     setbuf(stdout, NULL);
     setbuf(stderr, NULL);
+
+    // 初始化 CRC32 表
+    init_crc32_table();
 
     if (argc < 2) {
         print_usage(argv[0]);

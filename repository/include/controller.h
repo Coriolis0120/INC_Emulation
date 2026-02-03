@@ -74,6 +74,7 @@ struct RuleConfig {
     int direction;                // 0=DIR_UP, 1=DIR_DOWN
     bool root;                    // 当前交换机是否是这条规则的根
     int ack_conn;                 // ACK 发给哪个连接
+    std::vector<int> in_conns;    // 需要聚合的输入连接列表
     std::vector<int> out_conns;   // 转发给哪些连接
 };
 
@@ -123,6 +124,7 @@ struct convert<RuleConfig> {
         node["direction"] = rule.direction;
         node["root"] = rule.root;
         node["ack_conn"] = rule.ack_conn;
+        node["in_conns"] = rule.in_conns;
         node["out_conns"] = rule.out_conns;
         return node;
     }
@@ -264,6 +266,7 @@ struct controller_communicator{
                     rule.direction = 0;  // DIR_UP
                     rule.root = true;    // 根交换机是聚合根
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = switch_conns;  // 需要聚合所有子交换机的数据
                     rule.out_conns = switch_conns;  // 广播给所有子交换机
 
                     sw.rules.push_back(rule);
@@ -284,6 +287,7 @@ struct controller_communicator{
                     rule.direction = 0;  // DIR_UP
                     rule.root = false;   // 叶子交换机不是根
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = host_conns;  // 需要聚合所有本地主机的数据
                     rule.out_conns = {parent_conn};  // 向上转发到父交换机
 
                     sw.rules.push_back(rule);
@@ -301,6 +305,7 @@ struct controller_communicator{
                     rule.direction = 1;  // DIR_DOWN
                     rule.root = false;
                     rule.ack_conn = parent_conn;
+                    rule.in_conns = {parent_conn};  // 只从父交换机接收
                     rule.out_conns = host_conns;  // 广播给本地主机
 
                     sw.rules.push_back(rule);
@@ -320,21 +325,30 @@ struct controller_communicator{
         int world_size = group->world_size;
 
         for (int root_rank = 0; root_rank < world_size; root_rank++) {
-            // 找到 root_rank 所在的交换机
             auto root_loc = rank_to_conn[root_rank];
             int root_sw_id = root_loc.first;
             int root_conn_id = root_loc.second;
 
             for (int sw_id = 0; sw_id < TOPOLOGY_SIZE; sw_id++) {
                 auto& sw = switches[sw_id];
+                std::vector<int> host_conns = get_host_conns(sw_id);
                 std::vector<int> switch_conns = get_switch_conns(sw_id);
 
                 if (sw.is_root) {
-                    // 根交换机：从子交换机接收聚合数据
+                    // Spine：只从非 root 所在的子交换机接收，转发给 root_rank 所在子交换机
+                    // 计算需要聚合的子交换机连接（排除 root_sw）
+                    std::vector<int> non_root_switch_conns;
+                    for (auto& c : sw.connections) {
+                        if (c.is_switch && c.peer_id != root_sw_id) {
+                            non_root_switch_conns.push_back(c.conn_id);
+                        }
+                    }
+
                     for (auto& conn : sw.connections) {
                         if (!conn.is_switch) continue;
+                        // 跳过 root_rank 所在的子交换机（它不会发数据给 Spine）
+                        if (conn.peer_id == root_sw_id) continue;
 
-                        // 找到 root_rank 所在子交换机的连接
                         int target_conn = -1;
                         for (auto& c : sw.connections) {
                             if (c.is_switch && c.peer_id == root_sw_id) {
@@ -346,12 +360,13 @@ struct controller_communicator{
                         RuleConfig rule;
                         rule.src_ip = conn.peer_ip;
                         rule.dst_ip = conn.my_ip;
-                        rule.primitive = 2;  // REDUCE
+                        rule.primitive = 2;
                         rule.primitive_param = root_rank;
                         rule.conn_id = conn.conn_id;
-                        rule.direction = 0;  // DIR_UP
-                        rule.root = true;
+                        rule.direction = 0;
+                        rule.root = false;  // Spine 不是 root，只是中转
                         rule.ack_conn = conn.conn_id;
+                        rule.in_conns = non_root_switch_conns;  // 聚合所有非 root_sw 的子交换机
                         rule.out_conns = {target_conn};
 
                         sw.rules.push_back(rule);
@@ -360,37 +375,55 @@ struct controller_communicator{
                     // 叶子交换机
                     int parent_conn = get_parent_conn(sw_id);
                     int local_root_conn = get_conn_for_rank(sw_id, root_rank);
+                    bool is_root_sw = (sw_id == root_sw_id);
+
+                    // 计算 in_conns：root 所在交换机需要聚合 host + parent，非 root 只聚合 host
+                    std::vector<int> in_conns_for_leaf = host_conns;
+                    if (is_root_sw && parent_conn >= 0) {
+                        in_conns_for_leaf.push_back(parent_conn);
+                    }
 
                     // 从主机接收数据
                     for (auto& conn : sw.connections) {
                         if (conn.is_switch) continue;
 
+                        std::vector<int> out;
+                        if (is_root_sw) {
+                            // root 所在交换机：聚合后发给 root_rank
+                            out = {local_root_conn};
+                        } else {
+                            // 非 root 交换机：聚合后发给 parent
+                            out = {parent_conn};
+                        }
+
                         RuleConfig rule;
                         rule.src_ip = conn.peer_ip;
                         rule.dst_ip = conn.my_ip;
-                        rule.primitive = 2;  // REDUCE
+                        rule.primitive = 2;
                         rule.primitive_param = root_rank;
                         rule.conn_id = conn.conn_id;
-                        rule.direction = 0;  // DIR_UP
-                        rule.root = false;
+                        rule.direction = 0;
+                        rule.root = is_root_sw;  // root 所在叶子交换机是 root
                         rule.ack_conn = conn.conn_id;
-                        rule.out_conns = {parent_conn};
+                        rule.in_conns = in_conns_for_leaf;  // 聚合来源
+                        rule.out_conns = out;
 
                         sw.rules.push_back(rule);
                     }
 
-                    // 如果 root_rank 在本交换机，需要接收下行数据
-                    if (local_root_conn >= 0 && parent_conn >= 0) {
+                    // root 所在交换机：接收来自 Spine 的聚合数据
+                    if (is_root_sw && parent_conn >= 0) {
                         auto& pconn = sw.connections[parent_conn];
                         RuleConfig rule;
                         rule.src_ip = pconn.peer_ip;
                         rule.dst_ip = pconn.my_ip;
-                        rule.primitive = 2;  // REDUCE
+                        rule.primitive = 2;
                         rule.primitive_param = root_rank;
                         rule.conn_id = parent_conn;
-                        rule.direction = 1;  // DIR_DOWN
-                        rule.root = false;
+                        rule.direction = 1;
+                        rule.root = true;  // 接收下行数据时也是 root
                         rule.ack_conn = parent_conn;
+                        rule.in_conns = in_conns_for_leaf;  // 同样的聚合来源
                         rule.out_conns = {local_root_conn};
 
                         sw.rules.push_back(rule);
@@ -421,10 +454,18 @@ struct controller_communicator{
                 std::vector<int> switch_conns = get_switch_conns(sw_id);
 
                 if (sw.is_root) {
-                    // 根交换机：从 sender 所在子交换机接收，广播给所有子交换机
+                    // 根交换机：从 sender 所在子交换机接收，广播给其他子交换机
                     for (auto& conn : sw.connections) {
                         if (!conn.is_switch) continue;
                         if (conn.peer_id != sender_sw_id) continue;
+
+                        // 广播给除了来源之外的所有子交换机
+                        std::vector<int> other_switch_conns;
+                        for (int sc : switch_conns) {
+                            if (sc != conn.conn_id) {
+                                other_switch_conns.push_back(sc);
+                            }
+                        }
 
                         RuleConfig rule;
                         rule.src_ip = conn.peer_ip;
@@ -433,9 +474,10 @@ struct controller_communicator{
                         rule.primitive_param = sender_rank;
                         rule.conn_id = conn.conn_id;
                         rule.direction = 0;  // DIR_UP
-                        rule.root = true;
+                        rule.root = false;  // 根交换机不是 root，只是中转
                         rule.ack_conn = conn.conn_id;
-                        rule.out_conns = switch_conns;
+                        rule.in_conns = {conn.conn_id};  // 只从 sender 所在子交换机接收
+                        rule.out_conns = other_switch_conns;
 
                         sw.rules.push_back(rule);
                     }
@@ -444,8 +486,20 @@ struct controller_communicator{
                     int sender_conn = get_conn_for_rank(sw_id, sender_rank);
 
                     if (sw_id == sender_sw_id && sender_conn >= 0) {
-                        // sender 所在交换机：向上转发
+                        // sender 所在交换机：这是 root！同时发给 spine 和本地其他 host
                         auto& conn = sw.connections[sender_conn];
+
+                        // out_conns = parent + 本地其他 host
+                        std::vector<int> out_conns;
+                        if (parent_conn >= 0) {
+                            out_conns.push_back(parent_conn);
+                        }
+                        for (int hc : host_conns) {
+                            if (hc != sender_conn) {
+                                out_conns.push_back(hc);
+                            }
+                        }
+
                         RuleConfig rule;
                         rule.src_ip = conn.peer_ip;
                         rule.dst_ip = conn.my_ip;
@@ -453,15 +507,16 @@ struct controller_communicator{
                         rule.primitive_param = sender_rank;
                         rule.conn_id = sender_conn;
                         rule.direction = 0;
-                        rule.root = false;
+                        rule.root = true;  // sender 所在叶子交换机是 root
                         rule.ack_conn = sender_conn;
-                        rule.out_conns = {parent_conn};
+                        rule.in_conns = {sender_conn};  // 只从 sender 接收
+                        rule.out_conns = out_conns;
 
                         sw.rules.push_back(rule);
                     }
 
-                    // 接收下行广播数据
-                    if (parent_conn >= 0) {
+                    // 非 sender 所在交换机：接收下行广播数据
+                    if (sw_id != sender_sw_id && parent_conn >= 0) {
                         auto& pconn = sw.connections[parent_conn];
                         RuleConfig rule;
                         rule.src_ip = pconn.peer_ip;
@@ -472,7 +527,8 @@ struct controller_communicator{
                         rule.direction = 1;  // DIR_DOWN
                         rule.root = false;
                         rule.ack_conn = parent_conn;
-                        rule.out_conns = get_host_conns_except(sw_id, sender_rank);
+                        rule.in_conns = {parent_conn};  // 只从父交换机接收
+                        rule.out_conns = host_conns;  // 转发给所有本地 host
 
                         sw.rules.push_back(rule);
                     }
@@ -506,6 +562,7 @@ struct controller_communicator{
                     rule.direction = 0;  // DIR_UP
                     rule.root = true;
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = switch_conns;  // 聚合所有子交换机
                     rule.out_conns = switch_conns;
 
                     sw.rules.push_back(rule);
@@ -526,6 +583,7 @@ struct controller_communicator{
                     rule.direction = 0;  // DIR_UP
                     rule.root = false;
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = host_conns;  // 聚合所有本地主机
                     rule.out_conns = {parent_conn};
 
                     sw.rules.push_back(rule);
@@ -543,6 +601,7 @@ struct controller_communicator{
                     rule.direction = 1;  // DIR_DOWN
                     rule.root = false;
                     rule.ack_conn = parent_conn;
+                    rule.in_conns = {parent_conn};  // 只从父交换机接收
                     rule.out_conns = host_conns;
 
                     sw.rules.push_back(rule);
@@ -573,6 +632,7 @@ struct controller_communicator{
                     rule.direction = 0;
                     rule.root = true;
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = switch_conns;  // 聚合所有子交换机
                     rule.out_conns = switch_conns;
 
                     sw.rules.push_back(rule);
@@ -592,6 +652,7 @@ struct controller_communicator{
                     rule.direction = 0;
                     rule.root = false;
                     rule.ack_conn = conn.conn_id;
+                    rule.in_conns = host_conns;  // 聚合所有本地主机
                     rule.out_conns = {parent_conn};
 
                     sw.rules.push_back(rule);
@@ -608,6 +669,7 @@ struct controller_communicator{
                     rule.direction = 1;
                     rule.root = false;
                     rule.ack_conn = parent_conn;
+                    rule.in_conns = {parent_conn};  // 只从父交换机接收
                     rule.out_conns = host_conns;
 
                     sw.rules.push_back(rule);
@@ -778,8 +840,9 @@ struct controller_communicator{
         generate_barrier_rules();
         printf("[Controller] Barrier rules generated\n");
 
-        generate_reducescatter_rules();
-        printf("[Controller] ReduceScatter rules generated\n");
+        // ReduceScatter 暂不支持
+        // generate_reducescatter_rules();
+        // printf("[Controller] ReduceScatter rules generated\n");
 
         // 4) 生成 YAML
         generate_yaml();
