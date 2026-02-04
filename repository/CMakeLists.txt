@@ -137,3 +137,23 @@ target_link_libraries(host_allgather ibverbs pthread pcap ${YAML_CPP_STATIC})
 if(OPT_FLAGS)
     target_compile_options(host_allgather PRIVATE ${OPT_FLAGS})
 endif()
+
+# ============ Mode1: Connection Termination ============
+add_subdirectory(src/mode1)
+
+# switch_mode1 主程序
+add_executable(switch_mode1
+    termination_switch/src/switch_main_mode1.c
+    src/log.c)
+target_link_libraries(switch_mode1 mode1 pthread)
+if(OPT_FLAGS)
+    target_compile_options(switch_mode1 PRIVATE ${OPT_FLAGS})
+endif()
+
+# host_mode1 测试程序
+add_executable(host_mode1
+    src/mode1/host_test.c)
+target_link_libraries(host_mode1 mode1 ibverbs pthread)
+if(OPT_FLAGS)
+    target_compile_options(host_mode1 PRIVATE ${OPT_FLAGS})
+endif()
