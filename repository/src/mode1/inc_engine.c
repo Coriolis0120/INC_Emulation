@@ -9,6 +9,19 @@
 #include <pthread.h>
 #include "mode1/inc_engine.h"
 
+// 待处理数据结构（用于冲突时暂存）
+typedef struct pending_data {
+    uint32_t slot_id;
+    int conn_id;
+    void *data;
+    uint32_t len;
+    int prim;
+    int op;
+    int dtype;
+    int expected;
+    struct pending_data *next;
+} pending_data_t;
+
 // 聚合槽位结构
 typedef struct {
     uint32_t slot_id;           // 槽位索引
@@ -30,6 +43,10 @@ typedef struct {
     reduce_op_t op_type;
     data_type_t data_type;
     int root_rank;
+
+    // 待处理队列（冲突时暂存）
+    pending_data_t *pending_head;
+    pending_data_t *pending_tail;
 
     pthread_mutex_t mutex;
 } agg_slot_t;
@@ -145,6 +162,68 @@ static agg_slot_t *get_slot(uint32_t slot_id) {
     return &g_engine->slots[idx];
 }
 
+// 添加数据到待处理队列
+static void add_pending(agg_slot_t *slot, uint32_t slot_id, int conn_id,
+                        void *data, uint32_t len, int prim, int op, int dtype, int expected) {
+    pending_data_t *pd = malloc(sizeof(pending_data_t));
+    if (!pd) return;
+
+    pd->slot_id = slot_id;
+    pd->conn_id = conn_id;
+    pd->data = malloc(len);
+    if (!pd->data) {
+        free(pd);
+        return;
+    }
+    memcpy(pd->data, data, len);
+    pd->len = len;
+    pd->prim = prim;
+    pd->op = op;
+    pd->dtype = dtype;
+    pd->expected = expected;
+    pd->next = NULL;
+
+    if (slot->pending_tail) {
+        slot->pending_tail->next = pd;
+        slot->pending_tail = pd;
+    } else {
+        slot->pending_head = slot->pending_tail = pd;
+    }
+}
+
+// 处理待处理队列中的数据（返回是否有匹配的数据被处理）
+static int process_pending(agg_slot_t *slot, uint32_t target_slot_id) {
+    pending_data_t *prev = NULL;
+    pending_data_t *curr = slot->pending_head;
+
+    while (curr) {
+        if (curr->slot_id == target_slot_id) {
+            // 找到匹配的数据，执行归约
+            uint32_t reduce_len = (curr->len < slot->data_len) ? curr->len : slot->data_len;
+            do_reduce(slot->agg_buffer, curr->data, reduce_len, curr->op, curr->dtype);
+            slot->arrived_count++;
+            slot->arrival_bitmap |= (1ULL << curr->conn_id);
+
+            // 从队列中移除
+            if (prev) {
+                prev->next = curr->next;
+            } else {
+                slot->pending_head = curr->next;
+            }
+            if (curr == slot->pending_tail) {
+                slot->pending_tail = prev;
+            }
+
+            free(curr->data);
+            free(curr);
+            return 1;
+        }
+        prev = curr;
+        curr = curr->next;
+    }
+    return 0;
+}
+
 // 提交消息到聚合槽位
 int inc_engine_submit(uint32_t slot_id, int conn_id,
                       void *data, uint32_t len,
@@ -161,24 +240,18 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
 
     // 滑动窗口：检查是否是新的 slot_id（复用旧槽位）
     if (slot->state != SLOT_IDLE && slot->original_slot_id != slot_id) {
-        printf("[IncEngine] Slot %u reused (was %u), resetting\n",
+        // 槽位被新的 slot_id 复用，但旧的聚合还未完成
+        // 将新数据加入待处理队列，等待旧聚合完成
+        printf("[IncEngine] Slot conflict: new=%u, old=%u, adding to pending\n",
                slot_id, slot->original_slot_id);
         fflush(stdout);
-        // 旧 slot 被复用，强制重置
-        slot->state = SLOT_IDLE;
-        slot->arrived_count = 0;
-        slot->arrival_bitmap = 0;
-        if (slot->agg_buffer && slot->buf_size > 0) {
-            memset(slot->agg_buffer, 0, slot->buf_size);
-        }
-        slot->data_len = 0;
+        add_pending(slot, slot_id, conn_id, data, len, prim, op, dtype, expected);
+        pthread_mutex_unlock(&slot->mutex);
+        return 0;  // 未完成
     }
 
     if (slot->state == SLOT_IDLE) {
         // 第一个消息，初始化槽位
-        printf("[IncEngine] Slot %u: first msg from conn %d, expected=%d\n",
-               slot_id, conn_id, expected);
-        fflush(stdout);
         slot->original_slot_id = slot_id;
         slot->state = SLOT_AGGREGATING;
         slot->primitive = prim;
@@ -202,20 +275,20 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
         memcpy(slot->agg_buffer, data, len);
     } else {
         // 后续消息，执行归约
-        printf("[IncEngine] Slot %u: msg from conn %d, arrived=%u/%u\n",
-               slot_id, conn_id, slot->arrived_count + 1, slot->expected_count);
-        fflush(stdout);
         uint32_t reduce_len = (len < slot->data_len) ? len : slot->data_len;
         do_reduce(slot->agg_buffer, data, reduce_len, op, dtype);
         slot->arrived_count++;
         slot->arrival_bitmap |= (1ULL << conn_id);
     }
 
+    // 检查待处理队列中是否有匹配当前 slot_id 的数据
+    while (process_pending(slot, slot_id)) {
+        // 继续处理，直到没有匹配的数据
+    }
+
     int complete = (slot->arrived_count >= slot->expected_count);
     if (complete) {
         slot->state = SLOT_COMPLETE;
-        printf("[IncEngine] Slot %u complete: arrived=%u, expected=%u\n",
-               slot_id, slot->arrived_count, slot->expected_count);
     }
 
     pthread_mutex_unlock(&slot->mutex);
@@ -238,13 +311,34 @@ void inc_engine_reset_slot(uint32_t slot_id) {
     if (!slot) return;
 
     pthread_mutex_lock(&slot->mutex);
+
+    // 保存待处理队列
+    pending_data_t *pending = slot->pending_head;
+    slot->pending_head = NULL;
+    slot->pending_tail = NULL;
+
+    // 重置槽位
     slot->state = SLOT_IDLE;
     slot->arrived_count = 0;
     slot->arrival_bitmap = 0;
-    // 清零缓冲区，防止旧数据影响新聚合
     if (slot->agg_buffer && slot->buf_size > 0) {
         memset(slot->agg_buffer, 0, slot->buf_size);
     }
     slot->data_len = 0;
+    slot->original_slot_id = 0;
+
     pthread_mutex_unlock(&slot->mutex);
+
+    // 处理待处理队列中的数据（在锁外处理，避免死锁）
+    while (pending) {
+        pending_data_t *next = pending->next;
+        // 重新提交数据
+        inc_engine_submit(pending->slot_id, pending->conn_id,
+                          pending->data, pending->len,
+                          pending->prim, pending->op,
+                          pending->dtype, pending->expected);
+        free(pending->data);
+        free(pending);
+        pending = next;
+    }
 }

@@ -251,7 +251,15 @@ static int parse_yaml_config(switch_context_t *ctx, const char *yaml_buffer) {
         printf("[YAML] ctrl_expected_bitmap=0x%x (host connections)\n",
                ctx->ctrl_expected_bitmap);
 
-        // 7. 发送配置就绪信号
+        // 7. 解析 reduce_root_conn（Reduce 操作中 root 节点所在的连接）
+        // 从 YAML 中读取，如果没有则默认为 -1（表示 root 不在本交换机下）
+        ctx->reduce_root_conn = -1;
+        if (switch_node["reduce_root_conn"]) {
+            ctx->reduce_root_conn = switch_node["reduce_root_conn"].as<int>(-1);
+        }
+        printf("[YAML] reduce_root_conn=%d\n", ctx->reduce_root_conn);
+
+        // 8. 发送配置就绪信号
         pthread_mutex_lock(&ctx->config_mutex);
         ctx->config_ready = 1;
         pthread_cond_signal(&ctx->config_cond);

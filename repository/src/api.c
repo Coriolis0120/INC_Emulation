@@ -6,10 +6,10 @@
 #define TS_PRINT(...) printf(__VA_ARGS__)
 
 // 超时配置（单位：微秒）
-#define POLL_TIMEOUT_US 300000000  // 300秒（5分钟）总超时
+#define POLL_TIMEOUT_US 120000000  // 120秒总超时
 #define POLL_WARN_INTERVAL 10000000  // 10秒警告间隔
 // [DEBUG] 编译时打印超时配置
-#pragma message("[DEBUG] Host poll timeout = 300 seconds, warn interval = 10 seconds")
+#pragma message("[DEBUG] Host poll timeout = 120 seconds")
 
 
 /* 在各个rank节点和rank0之间建立临时连接，以及rank0和controller之间建立连接 */
@@ -1043,6 +1043,288 @@ void inccl_allreduce_simple(struct inccl_communicator *comm, int32_t* src_data, 
 
     printf("AllReduce_Simple: Completed, recv=%d\n", message_num);
     free(wc);
+}
+
+/* Reduce操作：简化版（用于 non_termination_switch）
+ * 所有节点发送数据，Switch 只将聚合结果发送给 root 节点
+ * 非 root 节点只发送数据，不等待接收
+ *
+ * 重要：Switch 使用 1KB payload，而 Host 使用 16KB 消息
+ * Switch 只发送给 root 节点，PSN 数量 = segment_num
+ */
+void inccl_reduce_simple(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data, int root_rank) {
+    int receive_num = 0;
+    int send_num = 0;
+    int message_num = (len + PAYLOAD_COUNT - 1) / PAYLOAD_COUNT;
+    int rank = comm->group->rank;
+    int is_root = (rank == root_rank);
+
+    // Switch 使用 1KB payload (256 个 int32)，计算 RDMA PSN 数量
+    int switch_payload_ints = 256;  // Switch 每个包 1024 字节 = 256 个 int32
+    int segment_num = (len + switch_payload_ints - 1) / switch_payload_ints;
+
+    printf("Reduce_Simple: rank=%d, root=%d, is_root=%d, len=%u, segment_num=%d\n",
+           rank, root_rank, is_root, len, segment_num);
+    printf("Reduce_Simple: message_num=%d, SLIDING_WINDOW_SIZE=%d\n", message_num, SLIDING_WINDOW_SIZE);
+    fflush(stdout);
+
+    // 真正的 Reduce：只有 root 节点需要接收 segment_num 个包
+    int target_recv = is_root ? segment_num : 0;
+    int window_size = SLIDING_WINDOW_SIZE < segment_num ? SLIDING_WINDOW_SIZE : segment_num;
+    int posted_recv = 0;
+
+    struct ibv_recv_wr rr;
+    struct ibv_sge receive_sge;
+    struct ibv_recv_wr *receive_bad_wr;
+
+    // 只有 root 节点需要接收数据
+    int recv_window = 16384;  // QP 队列深度限制
+    if(is_root) {
+        int initial_recv = window_size < recv_window ? window_size : recv_window;
+        printf("Reduce_Simple: root posting initial_recv=%d, window_size=%d, recv_window=%d\n",
+               initial_recv, window_size, recv_window);
+        fflush(stdout);
+        for(int i = 0; i < initial_recv; i++) {
+            int slot = i % window_size;
+            memset(&receive_sge, 0, sizeof(receive_sge));
+            receive_sge.addr = (uintptr_t)(comm->receive_payload + slot * switch_payload_ints * sizeof(int32_t));
+            receive_sge.length = switch_payload_ints * sizeof(int32_t);
+            receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+            memset(&rr, 0, sizeof(rr));
+            rr.wr_id = i;
+            rr.sg_list = &receive_sge;
+            rr.num_sge = 1;
+
+            ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+            posted_recv++;
+        }
+    }
+
+    // 准备发送数据
+    int32_t *send_buffer = (int32_t*)comm->send_payload;
+    for(int i = 0; i < message_num; i++) {
+        int32_t *msg_buffer = send_buffer + i * PAYLOAD_COUNT;
+        for(int j = 0; j < PAYLOAD_COUNT; j++) {
+            int src_idx = i * PAYLOAD_COUNT + j;
+            msg_buffer[j] = (src_idx < (int)len) ? htonl(src_data[src_idx]) : 0;
+        }
+    }
+
+    // 使用滑动窗口发送消息（QP 队列深度限制为 16384）
+    struct ibv_send_wr wr;
+    struct ibv_sge send_sge;
+    struct ibv_send_wr *send_bad_wr;
+    int send_window = 16384;  // QP 队列深度限制
+    int send_completed = 0;
+
+    // 先 post 初始窗口大小的发送请求
+    int initial_send = message_num < send_window ? message_num : send_window;
+    printf("Reduce_Simple: posting initial_send=%d, message_num=%d, send_window=%d\n",
+           initial_send, message_num, send_window);
+    fflush(stdout);
+    for(int i = 0; i < initial_send; i++) {
+        memset(&send_sge, 0, sizeof(send_sge));
+        send_sge.addr = (uintptr_t)(comm->send_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
+        send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+        send_sge.lkey = comm->mr_send_payload->lkey;
+
+        memset(&wr, 0, sizeof(wr));
+        wr.wr_id = i;
+        wr.sg_list = &send_sge;
+        wr.num_sge = 1;
+        wr.send_flags = IBV_SEND_SIGNALED;
+        wr.opcode = IBV_WR_SEND;
+
+        ibv_post_send(comm->qp, &wr, &send_bad_wr);
+        send_num++;
+    }
+
+    // 非 root 节点：滑动窗口发送，等待完成后补充新请求
+    if(!is_root) {
+        struct ibv_wc wc_batch[64];
+        while(send_completed < message_num) {
+            int result = ibv_poll_cq(comm->cq, 64, wc_batch);
+            if(result > 0) {
+                for(int i = 0; i < result; i++) {
+                    if(wc_batch[i].status == IBV_WC_SUCCESS && wc_batch[i].opcode == IBV_WC_SEND) {
+                        send_completed++;
+                        // 补充新的发送请求
+                        if(send_num < message_num) {
+                            memset(&send_sge, 0, sizeof(send_sge));
+                            send_sge.addr = (uintptr_t)(comm->send_payload + send_num * PAYLOAD_COUNT * sizeof(int32_t));
+                            send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+                            send_sge.lkey = comm->mr_send_payload->lkey;
+
+                            memset(&wr, 0, sizeof(wr));
+                            wr.wr_id = send_num;
+                            wr.sg_list = &send_sge;
+                            wr.num_sge = 1;
+                            wr.send_flags = IBV_SEND_SIGNALED;
+                            wr.opcode = IBV_WR_SEND;
+
+                            ibv_post_send(comm->qp, &wr, &send_bad_wr);
+                            send_num++;
+                        }
+                    }
+                }
+            }
+        }
+        printf("Reduce_Simple: Non-root rank=%d, sent %d messages, done\n", rank, send_num);
+        return;
+    }
+
+    // ===== ROOT 节点：先发送所有数据，再处理接收 =====
+    // 关键：不等待 ACK 就继续发送，避免死锁
+    // 死锁原因：pku1 等 ACK → Switch 等 pku1 数据 → 循环等待
+
+    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc) * 512);
+    struct timeval start_time, current_time;
+    gettimeofday(&start_time, NULL);
+
+    printf("Reduce_Simple: ROOT - Phase1: sending all data without waiting for ACK\n");
+    printf("Reduce_Simple: message_num=%d, target_recv=%d, send_window=%d\n",
+           message_num, target_recv, send_window);
+    fflush(stdout);
+
+    // Phase 1: 发送所有数据（不等待 ACK，只保持 QP 队列不溢出）
+    // 通过 poll CQ 来释放 QP 队列空间，但不阻塞等待
+    int in_flight = send_num;  // 当前在途的发送请求数
+
+    while(send_num < message_num) {
+        // 检查超时
+        gettimeofday(&current_time, NULL);
+        uint64_t elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                              (current_time.tv_usec - start_time.tv_usec);
+        if(elapsed_us > POLL_TIMEOUT_US) {
+            printf("Reduce_Simple: TIMEOUT in Phase1! send=%d/%d, completed=%d, in_flight=%d\n",
+                   send_num, message_num, send_completed, in_flight);
+            free(wc);
+            return;
+        }
+
+        // 非阻塞 poll CQ，处理发送和接收完成事件
+        int result = ibv_poll_cq(comm->cq, 512, wc);
+        for(int i = 0; i < result; i++) {
+            struct ibv_wc *tmp = wc + i;
+            if(tmp->status == IBV_WC_SUCCESS && tmp->opcode == IBV_WC_SEND) {
+                send_completed++;
+                in_flight--;
+            }
+            // 处理接收完成 - 必须复制数据，否则会丢失
+            else if(tmp->status == IBV_WC_SUCCESS &&
+                    (tmp->opcode == IBV_WC_RECV || tmp->opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                uint64_t idx = tmp->wr_id;
+                int slot = idx % window_size;
+                int *pack = (int *)(comm->receive_payload + slot * switch_payload_ints * sizeof(int32_t));
+                for(int j = 0; j < switch_payload_ints; ++j) {
+                    int dst_idx = idx * switch_payload_ints + j;
+                    if(dst_idx < (int)len) {
+                        dst_data[dst_idx] = ntohl(pack[j]);
+                    }
+                }
+                if(posted_recv < segment_num) {
+                    int new_slot = posted_recv % window_size;
+                    receive_sge.addr = (uintptr_t)(comm->receive_payload + new_slot * switch_payload_ints * sizeof(int32_t));
+                    receive_sge.length = switch_payload_ints * sizeof(int32_t);
+                    receive_sge.lkey = comm->mr_receive_payload->lkey;
+                    rr.wr_id = posted_recv;
+                    rr.sg_list = &receive_sge;
+                    rr.num_sge = 1;
+                    ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+                    posted_recv++;
+                }
+                receive_num++;
+            }
+        }
+
+        // 如果 QP 队列有空间，继续发送
+        while(in_flight < send_window && send_num < message_num) {
+            memset(&send_sge, 0, sizeof(send_sge));
+            send_sge.addr = (uintptr_t)(comm->send_payload + send_num * PAYLOAD_COUNT * sizeof(int32_t));
+            send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+            send_sge.lkey = comm->mr_send_payload->lkey;
+
+            memset(&wr, 0, sizeof(wr));
+            wr.wr_id = send_num;
+            wr.sg_list = &send_sge;
+            wr.num_sge = 1;
+            wr.send_flags = IBV_SEND_SIGNALED;
+            wr.opcode = IBV_WR_SEND;
+
+            ibv_post_send(comm->qp, &wr, &send_bad_wr);
+            send_num++;
+            in_flight++;
+        }
+    }
+
+    printf("Reduce_Simple: ROOT Phase1 done, all %d messages posted, completed=%d, recv=%d/%d\n",
+           send_num, send_completed, receive_num, target_recv);
+    fflush(stdout);
+
+    // Phase 2: 等待所有发送完成和接收完成
+    printf("Reduce_Simple: ROOT - Phase2: waiting for completions\n");
+    fflush(stdout);
+
+    uint64_t last_print = 0;
+    while(send_completed < message_num || receive_num < target_recv) {
+        gettimeofday(&current_time, NULL);
+        uint64_t elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                              (current_time.tv_usec - start_time.tv_usec);
+        if(elapsed_us > POLL_TIMEOUT_US) {
+            printf("Reduce_Simple: TIMEOUT in Phase2! send_completed=%d/%d, recv=%d/%d\n",
+                   send_completed, message_num, receive_num, target_recv);
+            free(wc);
+            return;
+        }
+
+        // 每5秒打印进度
+        if(elapsed_us - last_print > 5000000) {
+            printf("Reduce_Simple: Phase2 progress: send_completed=%d/%d, recv=%d/%d, posted_recv=%d\n",
+                   send_completed, message_num, receive_num, target_recv, posted_recv);
+            fflush(stdout);
+            last_print = elapsed_us;
+        }
+
+        int result = ibv_poll_cq(comm->cq, 512, wc);
+        for(int i = 0; i < result; i++) {
+            struct ibv_wc *tmp = wc + i;
+            if(tmp->status == IBV_WC_SUCCESS && tmp->opcode == IBV_WC_SEND) {
+                send_completed++;
+            }
+            else if(tmp->status == IBV_WC_SUCCESS &&
+                    (tmp->opcode == IBV_WC_RECV || tmp->opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                uint64_t idx = tmp->wr_id;
+                int slot = idx % window_size;
+                int *pack = (int *)(comm->receive_payload + slot * switch_payload_ints * sizeof(int32_t));
+                for(int j = 0; j < switch_payload_ints; ++j) {
+                    int dst_idx = idx * switch_payload_ints + j;
+                    if(dst_idx < (int)len) {
+                        dst_data[dst_idx] = ntohl(pack[j]);
+                    }
+                }
+                if(posted_recv < segment_num) {
+                    int new_slot = posted_recv % window_size;
+                    memset(&receive_sge, 0, sizeof(receive_sge));
+                    receive_sge.addr = (uintptr_t)(comm->receive_payload + new_slot * switch_payload_ints * sizeof(int32_t));
+                    receive_sge.length = switch_payload_ints * sizeof(int32_t);
+                    receive_sge.lkey = comm->mr_receive_payload->lkey;
+                    memset(&rr, 0, sizeof(rr));
+                    rr.wr_id = posted_recv;
+                    rr.sg_list = &receive_sge;
+                    rr.num_sge = 1;
+                    ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+                    posted_recv++;
+                }
+                receive_num++;
+            }
+        }
+    }
+
+    printf("Reduce_Simple: ROOT done, send_completed=%d, receive_num=%d\n", send_completed, receive_num);
+    fflush(stdout);
+    free(wc);
+    return;
 }
 
 /* AllReduce操作：使用RDMA WRITE语义（单边RDMA）

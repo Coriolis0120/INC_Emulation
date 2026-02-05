@@ -35,6 +35,9 @@ static int g_is_root = 0;
 static int g_expected_children = 1;  // ROOT 期望的子交换机数量（可通过 -c 参数配置）
 static int g_expected_hosts = 2;     // LEAF 期望的 Host 数量（可通过 -n 参数配置）
 
+// rank 到 conn_id 的映射表 (用于 Reduce 发送给特定 rank)
+static int g_rank_to_conn[16] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
+
 // 信号处理
 static void signal_handler(int sig) {
     (void)sig;
@@ -113,16 +116,15 @@ static int select_downlink_by_ip(const char *ip_str) {
 }
 
 // 发送结果给指定的 Host (用于 Reduce)
-// root_rank 是目标 Host 的 rank
+// root_rank 是目标 Host 的全局 rank
 static void send_to_root_host(uint32_t slot_id, void *data, uint32_t len, int root_rank) {
-    // 新格式: [slot_id:20][prim:2][op:2][rank:8]
-    uint32_t imm = ((slot_id & 0xFFFFF) << 12) | (PRIM_REDUCE << 10) | (root_rank & 0xFF);
+    // 新格式: [slot_id:20][prim:2][op:2][sender:4][root:4]
+    uint32_t imm = ((slot_id & 0xFFFFF) << 12) | (PRIM_REDUCE << 10) | (0xF << 4) | (root_rank & 0xF);
     struct ibv_wc wc[64];
     static int reduce_send_count = 0;
 
-    printf("[send_to_root_host] slot=%u, len=%u, root_rank=%d, host_count=%d\n",
-           slot_id, len, root_rank, g_roce_ctx->host_count);
-    fflush(stdout);
+    // 计算本地 host 索引：root_rank % g_expected_hosts
+    int local_idx = root_rank % g_expected_hosts;
 
     // 将数据复制到已注册的发送缓冲区
     if (len > g_roce_ctx->send_buf_size) {
@@ -132,36 +134,45 @@ static void send_to_root_host(uint32_t slot_id, void *data, uint32_t len, int ro
     }
     memcpy(g_roce_ctx->send_buf, data, len);
 
-    // 每发送一定数量后清理 CQ
+    // 每次发送前都清理 CQ，确保有足够空间
     reduce_send_count++;
-    if (reduce_send_count % 100 == 0) {
-        for (int poll = 0; poll < 64; poll++) {
-            int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
-            if (n <= 0) break;
-        }
+    for (int poll = 0; poll < 64; poll++) {
+        int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
+        if (n <= 0) break;
     }
 
-    // 发送给所有 Host，由 Host 端根据 rank 判断是否接收
-    for (int i = 0; i < g_roce_ctx->host_count; i++) {
-        qp_conn_t *conn = g_roce_ctx->host_conns[i];
+    // 使用 rank 到 conn_id 的映射表找到正确的连接
+    int local_rank = root_rank % g_expected_hosts;
+    int conn_idx = g_rank_to_conn[local_rank];
+
+    printf("[send_to_root_host] slot=%u, root_rank=%d, local_rank=%d, conn_idx=%d\n",
+           slot_id, root_rank, local_rank, conn_idx);
+    fflush(stdout);
+
+    if (conn_idx >= 0 && conn_idx < g_roce_ctx->host_count) {
+        qp_conn_t *conn = g_roce_ctx->host_conns[conn_idx];
         if (conn && conn->is_connected) {
-            // 带重试的发送
             int ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
             int retry = 0;
-            while (ret != 0 && retry < 100) {
-                // 清理 CQ 后重试
-                for (int poll = 0; poll < 64; poll++) {
+            while (ret != 0 && retry < 1000) {
+                for (int poll = 0; poll < 128; poll++) {
                     int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
                     if (n <= 0) break;
                 }
+                usleep(100);
                 ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
                 retry++;
             }
             if (ret != 0) {
-                printf("[send_to_root_host] FAILED after %d retries, host %d\n", retry, i);
+                printf("[send_to_root_host] FAILED after %d retries, slot=%u\n", retry, slot_id);
             }
+        } else {
+            printf("[send_to_root_host] conn NULL or not connected\n");
         }
+    } else {
+        printf("[send_to_root_host] SKIP: conn_idx=%d invalid\n", conn_idx);
     }
+    fflush(stdout);
 }
 
 // 发送结果给指定的子交换机 (ROOT -> 特定 LEAF，用于 Reduce)
@@ -477,16 +488,17 @@ static void *message_loop(void *arg) {
                     uint32_t len = wc[i].byte_len;
                     uint32_t imm = ntohl(wc[i].imm_data);
 
-                    // 新格式: [slot_id:20][prim:2][op:2][rank:8]
+                    // 新格式: [slot_id:20][prim:2][op:2][sender:4][root:4]
                     uint32_t slot_id = (imm >> 12) & 0xFFFFF;
                     int prim = (imm >> 10) & 0x3;
                     int op = (imm >> 8) & 0x3;
-                    int dtype = DTYPE_INT32;  // 固定为 INT32
-                    int rank = imm & 0xFF;
-                    int from_child = (rank == 0xFF);
+                    int dtype = DTYPE_INT32;
+                    int sender = (imm >> 4) & 0xF;
+                    int root_rank = imm & 0xF;
+                    int from_child = (sender == 0xF);  // 0xF 表示来自子交换机
 
-                    printf("[Mode1] ROOT recv from downlink %d: slot=%u, prim=%d, from_child=%d, len=%u, rank=%d\n",
-                           d, slot_id, prim, from_child, len, rank);
+                    printf("[Mode1] ROOT recv from downlink %d: slot=%u, prim=%d, sender=%d, root=%d\n",
+                           d, slot_id, prim, sender, root_rank);
                     fflush(stdout);
 
                     // 对于 ROOT，conn_id 应该是 downlink 索引 d
@@ -503,9 +515,9 @@ static void *message_loop(void *arg) {
                         if (result) {
                             if (prim == PRIM_REDUCE) {
                                 // Reduce: 只发送给 root_rank 所在的 LEAF
-                                printf("[Mode1] ROOT: REDUCE - sending to root_rank=%d\n", rank);
+                                printf("[Mode1] ROOT: REDUCE - sending to root_rank=%d\n", root_rank);
                                 fflush(stdout);
-                                send_to_root_leaf(slot_id, result, result_len, rank);
+                                send_to_root_leaf(slot_id, result, result_len, root_rank);
                             } else {
                                 // AllReduce: 广播给所有子交换机
                                 printf("[Mode1] ROOT: ALLREDUCE - broadcasting to all children\n");
@@ -538,19 +550,20 @@ static void *message_loop(void *arg) {
                 uint32_t len = wc[i].byte_len;
                 uint32_t imm = ntohl(wc[i].imm_data);
 
-                // 新格式: [slot_id:20][prim:2][op:2][rank:8]
+                // 新格式: [slot_id:20][prim:2][op:2][sender:4][root:4]
                 uint32_t slot_id = (imm >> 12) & 0xFFFFF;
                 int prim = (imm >> 10) & 0x3;
                 int op = (imm >> 8) & 0x3;
                 int dtype = DTYPE_INT32;
-                int rank = imm & 0xFF;
-                int from_child = (rank == 0xFF);
+                int sender = (imm >> 4) & 0xF;
+                int root_rank = imm & 0xF;
+                int from_child = (sender == 0xF);
 
                 if (g_is_root) {
-                    printf("[Mode1] ROOT recv: slot=%u, prim=%d, from_child=%d, len=%u, rank=%d\n",
-                           slot_id, prim, from_child, len, rank);
+                    printf("[Mode1] ROOT recv: slot=%u, prim=%d, from_child=%d, len=%u, sender=%d, root=%d\n",
+                           slot_id, prim, from_child, len, sender, root_rank);
                     fflush(stdout);
-                    int complete = inc_engine_submit(slot_id, from_child ? 100 : rank,
+                    int complete = inc_engine_submit(slot_id, from_child ? 100 : sender,
                                                      data, len, prim, op, dtype, g_expected_children);
                     if (complete == 1) {
                         uint32_t result_len;
@@ -559,9 +572,9 @@ static void *message_loop(void *arg) {
                         fflush(stdout);
                         if (result) {
                             if (prim == PRIM_REDUCE) {
-                                printf("[Mode1] ROOT: REDUCE - sending to root_rank=%d\n", rank);
+                                printf("[Mode1] ROOT: REDUCE - sending to root_rank=%d\n", root_rank);
                                 fflush(stdout);
-                                send_to_root_leaf(slot_id, result, result_len, rank);
+                                send_to_root_leaf(slot_id, result, result_len, root_rank);
                             } else {
                                 printf("[Mode1] ROOT: ALLREDUCE - broadcasting\n");
                                 fflush(stdout);
@@ -571,13 +584,22 @@ static void *message_loop(void *arg) {
                         }
                     }
                 } else {
-                    printf("[Mode1] LEAF recv from host: slot=%u, prim=%d, rank=%d, len=%u\n",
-                           slot_id, prim, rank, len);
+                    // 计算 conn_idx 并更新 rank 到 conn 的映射
+                    uint64_t buf_slot = wc[i].wr_id % RECV_BUF_COUNT;
+                    int conn_idx = buf_slot / RECV_BUF_PER_CONN;
+                    int local_rank = sender % g_expected_hosts;
+                    if (local_rank < 16 && g_rank_to_conn[local_rank] < 0) {
+                        g_rank_to_conn[local_rank] = conn_idx;
+                        printf("[Mode1] LEAF: mapped local_rank=%d to conn_idx=%d\n", local_rank, conn_idx);
+                    }
+
+                    printf("[Mode1] LEAF recv from host: slot=%u, prim=%d, sender=%d, root=%d, len=%u\n",
+                           slot_id, prim, sender, root_rank, len);
                     fflush(stdout);
                     int expected = g_expected_hosts;
                     printf("[Mode1] LEAF: expected=%d hosts, calling inc_engine_submit\n", expected);
                     fflush(stdout);
-                    int complete = inc_engine_submit(slot_id, rank % g_expected_hosts, data, len,
+                    int complete = inc_engine_submit(slot_id, sender % g_expected_hosts, data, len,
                                                      prim, op, dtype, expected);
                     printf("[Mode1] LEAF: inc_engine_submit returned %d\n", complete);
                     fflush(stdout);
@@ -595,18 +617,18 @@ static void *message_loop(void *arg) {
                                    has_uplink, has_conn, is_conn);
                             fflush(stdout);
                             if (has_uplink && has_conn && is_conn) {
-                                printf("[Mode1] LEAF: forwarding slot %u, prim=%d, rank=%d to parent\n",
-                                       slot_id, prim, rank);
+                                printf("[Mode1] LEAF: forwarding slot %u, prim=%d, root_rank=%d to parent\n",
+                                       slot_id, prim, root_rank);
                                 fflush(stdout);
                                 // 使用扩展版本，传递 prim 和 root_rank
-                                forward_to_parent_ex(slot_id, result, result_len, prim, rank);
+                                forward_to_parent_ex(slot_id, result, result_len, prim, root_rank);
                                 inc_engine_reset_slot(slot_id);
                             } else {
                                 // 没有上行连接，直接发送给 Host
                                 if (prim == PRIM_REDUCE) {
-                                    printf("[Mode1] LEAF: REDUCE - sending to root_rank=%d\n", rank);
+                                    printf("[Mode1] LEAF: REDUCE - sending to root_rank=%d\n", root_rank);
                                     fflush(stdout);
-                                    send_to_root_host(slot_id, result, result_len, rank);
+                                    send_to_root_host(slot_id, result, result_len, root_rank);
                                 } else {
                                     printf("[Mode1] LEAF: ALLREDUCE - broadcasting to hosts\n");
                                     fflush(stdout);

@@ -9,7 +9,7 @@
 
 // SWITCH 相关
 #define MAX_CONNECTIONS_NUM 10
-#define SWITCH_ARRAY_LENGTH 131072  // 支持512MB测试 (静态分配最大值)
+#define SWITCH_ARRAY_LENGTH 1048576  // 支持1GB测试 (静态分配最大值)
 #define MAX_PORT_NUM 10
 
 // 拓扑相关

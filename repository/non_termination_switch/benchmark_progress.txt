@@ -1,0 +1,4 @@
+BENCHMARK STARTED: Thu Feb  5 11:32:52 PM CST 2026
+
+=== Testing 4KB (1/10) ===
+  4KB iter 1/10 - 23:32:52

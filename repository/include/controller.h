@@ -84,6 +84,7 @@ struct RuleConfig {
 struct SwitchConfig {
     int id;
     bool is_root;  // 是否是根交换机（树形拓扑的顶层）
+    int reduce_root_conn;  // Reduce 操作中 root 节点所在的连接 ID (-1 表示不在本交换机下)
     std::vector<ConnectionConfig> connections;
     std::vector<RuleConfig> rules;
 };
@@ -136,6 +137,7 @@ struct convert<SwitchConfig> {
         Node node;
         node["id"] = sw.id;
         node["is_root"] = sw.is_root;
+        node["reduce_root_conn"] = sw.reduce_root_conn;
         node["connections"] = sw.connections;
         node["rules"] = sw.rules;
         return node;
@@ -694,6 +696,7 @@ struct controller_communicator{
             SwitchConfig sc;
             sc.id = info.id;
             sc.is_root = (i == 0);  // Switch 0 是根交换机
+            sc.reduce_root_conn = -1;  // 默认 -1，稍后根据 root_rank 设置
 
             int conn_id = 0;
             for (auto& port : info.ports) {
@@ -827,7 +830,18 @@ struct controller_communicator{
 
         printf("[Controller] connections initialized\n");
 
-        // 3) 生成规则
+        // 4) 设置 reduce_root_conn (Reduce 操作中 root 节点所在的连接)
+        // 假设 root_rank = 0，在 Switch 1 下的 conn 1 (pku1)
+        // Switch 0 (Spine): root 在 Switch 1 下，所以 reduce_root_conn = 0 (连接到 Switch 1)
+        // Switch 1 (Leaf1): root 是 pku1 (rank 0)，对应 conn 1
+        // Switch 2 (Leaf2): root 不在这里，reduce_root_conn = -1
+        switches[0].reduce_root_conn = 0;  // Spine -> Switch 1
+        switches[1].reduce_root_conn = 1;  // Leaf1 -> pku1 (rank 0)
+        switches[2].reduce_root_conn = -1; // Leaf2 没有 root
+        printf("[Controller] reduce_root_conn set: sw0=%d, sw1=%d, sw2=%d\n",
+               switches[0].reduce_root_conn, switches[1].reduce_root_conn, switches[2].reduce_root_conn);
+
+        // 5) 生成规则
         generate_allreduce_rules();
         printf("[Controller] AllReduce rules generated\n");
 

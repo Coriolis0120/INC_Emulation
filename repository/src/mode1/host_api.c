@@ -316,15 +316,17 @@ void mode1_host_destroy(mode1_host_ctx_t *ctx) {
     free(ctx);
 }
 
-// 构造 imm_data: [slot_id:20][prim:2][op:2][rank:8]
-// 支持最大 1048576 个消息 = 4GB 数据量
+// 构造 imm_data: [slot_id:20][prim:2][op:2][sender:4][root:4]
+// sender: 发送者 rank (0-15), root: 目标 rank (0-15，仅 Reduce 使用)
 static uint32_t make_imm_data(uint32_t slot_id, primitive_t prim,
-                               reduce_op_t op, data_type_t dtype, uint8_t rank) {
-    (void)dtype;  // dtype 固定为 INT32，不再编码
+                               reduce_op_t op, data_type_t dtype,
+                               uint8_t sender, uint8_t root) {
+    (void)dtype;
     return ((slot_id & 0xFFFFF) << 12) |
            ((prim & 0x3) << 10) |
            ((op & 0x3) << 8) |
-           (rank & 0xFF);
+           ((sender & 0xF) << 4) |
+           (root & 0xF);
 }
 
 // 发送 RDMA 消息
@@ -402,7 +404,7 @@ int mode1_allreduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
 
         memcpy(ctx->send_buf, (char*)src + offset, chunk_len);
         uint32_t imm = make_imm_data(i, PRIM_ALLREDUCE, OP_SUM,
-                                      DTYPE_INT32, ctx->rank);
+                                      DTYPE_INT32, ctx->rank, 0xF);
 
         if (post_send(ctx, ctx->send_buf, chunk_len, imm, i) != 0) {
             fprintf(stderr, "Failed to post send %u\n", i);
@@ -446,7 +448,7 @@ int mode1_allreduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
                                          PAYLOAD_SIZE : (data_len - offset);
                     memcpy(ctx->send_buf, (char*)src + offset, chunk_len);
                     uint32_t imm = make_imm_data(i, PRIM_ALLREDUCE, OP_SUM,
-                                                  DTYPE_INT32, ctx->rank);
+                                                  DTYPE_INT32, ctx->rank, 0xF);
                     post_send(ctx, ctx->send_buf, chunk_len, imm, i);
                     posted_send++;
                 }
@@ -544,8 +546,8 @@ int mode1_reduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
                              PAYLOAD_SIZE : (data_len - offset);
 
         memcpy(ctx->send_buf, (char*)src + offset, chunk_len);
-        // 对于 Reduce，rank 字段存储 root_rank，用于 Switch 判断发送目标
-        uint32_t imm = make_imm_data(i, PRIM_REDUCE, OP_SUM, DTYPE_INT32, root);
+        // 对于 Reduce，sender=ctx->rank, root=目标节点
+        uint32_t imm = make_imm_data(i, PRIM_REDUCE, OP_SUM, DTYPE_INT32, ctx->rank, root);
 
         if (post_send(ctx, ctx->send_buf, chunk_len, imm, i) != 0) {
             fprintf(stderr, "[Host %d] Reduce: Failed to post send %u\n", ctx->rank, i);
@@ -597,7 +599,7 @@ int mode1_reduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
                     uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
                                          PAYLOAD_SIZE : (data_len - offset);
                     memcpy(ctx->send_buf, (char*)src + offset, chunk_len);
-                    uint32_t imm = make_imm_data(i, PRIM_REDUCE, OP_SUM, DTYPE_INT32, root);
+                    uint32_t imm = make_imm_data(i, PRIM_REDUCE, OP_SUM, DTYPE_INT32, ctx->rank, root);
                     post_send(ctx, ctx->send_buf, chunk_len, imm, i);
                     posted_send++;
                 }

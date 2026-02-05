@@ -45,13 +45,16 @@ typedef struct {
     
     // === 当前处理原语 ===
     primitive_type_t operation_type; // 替代 current_operation_type
-    int primitive_param;                   
+    int primitive_param;
     uint32_t bitmap_mask; // 在control来的时候计算（本应该也在控制平面设置表，然后控制包来的时候查表）
     uint32_t root_conn;
+
+    // === Reduce 专用 ===
+    int reduce_root_conn;  // Reduce 操作中 root 节点所在的连接 ID (-1 表示不在本交换机下)
     // === 聚合资源 ===
-    uint32_t arrival_state[SWITCH_ARRAY_LENGTH]; // Max 32 ports, bitmap, need MASK and contain the result from parent, and can use mask to play the role of degree
-    int aggregator[SWITCH_ARRAY_LENGTH][PAYLOAD_LEN / sizeof(int)];
-    int degree[SWITCH_ARRAY_LENGTH];  // 重传计数，用于触发向父节点重传
+    uint32_t *arrival_state;  // 动态分配，Max 32 ports, bitmap
+    int **aggregator;         // 动态分配，二维数组
+    int *degree;              // 动态分配，重传计数
 
     // === 控制消息状态 ===
     uint32_t ctrl_arrival_bitmap;    // 已收到控制消息的连接位图

@@ -5,7 +5,7 @@
 TEST_SIZES="${1:-1024 4194304}"
 NUM_RUNS=${2:-10}
 ROOT_RANK=${3:-0}
-SWITCH_PORT=52410
+SWITCH_PORT=52400
 GID_IDX=1
 
 SPINE_HOST="switch"
@@ -55,9 +55,10 @@ run_single_test() {
     local PID4=$!
     wait $PID1 $PID2 $PID3 $PID4
 
-    # 从 root 节点提取时间
-    local TIME=$(grep "Reduce time:" /tmp/pku${ROOT_RANK}.log 2>/dev/null | tail -1 | awk '{print $(NF-1)}')
-    local PASS=$(grep -c "PASS" /tmp/pku${ROOT_RANK}.log 2>/dev/null || echo 0)
+    # 从 root 节点提取时间 (ROOT_RANK=0 对应 pku1, ROOT_RANK=1 对应 pku2, ...)
+    local ROOT_PKU=$((ROOT_RANK + 1))
+    local TIME=$(grep "Reduce time:" /tmp/pku${ROOT_PKU}.log 2>/dev/null | tail -1 | awk '{print $5}')
+    local PASS=$(grep -c "PASS" /tmp/pku${ROOT_PKU}.log 2>/dev/null || echo 0)
 
     if [ "$PASS" -ge "1" ] && [ -n "$TIME" ] && [ "$TIME" -gt 0 ] 2>/dev/null; then
         awk "BEGIN {printf \"%.2f\", $BYTES * 8.0 / $TIME}"

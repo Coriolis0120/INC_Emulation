@@ -46,9 +46,27 @@ int switch_context_init(switch_context_t *ctx, int switch_id) {
     ctx->operation_type = PRIMITIVE_TYPE_ALLREDUCE;
     ctx->primitive_param = -1;
 
-    // 初始化聚合资源
-    memset(ctx->arrival_state, 0, sizeof(ctx->arrival_state));
-    memset(ctx->aggregator, 0, sizeof(ctx->aggregator));
+    // 动态分配聚合资源
+    ctx->arrival_state = (uint32_t *)calloc(SWITCH_ARRAY_LENGTH, sizeof(uint32_t));
+    ctx->degree = (int *)calloc(SWITCH_ARRAY_LENGTH, sizeof(int));
+    ctx->aggregator = (int **)malloc(SWITCH_ARRAY_LENGTH * sizeof(int *));
+
+    if (!ctx->arrival_state || !ctx->degree || !ctx->aggregator) {
+        fprintf(stderr, "switch_context_init: failed to allocate memory\n");
+        return -1;
+    }
+
+    int payload_ints = PAYLOAD_LEN / sizeof(int);
+    for (int i = 0; i < SWITCH_ARRAY_LENGTH; i++) {
+        ctx->aggregator[i] = (int *)calloc(payload_ints, sizeof(int));
+        if (!ctx->aggregator[i]) {
+            fprintf(stderr, "switch_context_init: failed to allocate aggregator[%d]\n", i);
+            return -1;
+        }
+    }
+    printf("Allocated aggregator: %d slots x %d ints = %lu MB\n",
+           SWITCH_ARRAY_LENGTH, payload_ints,
+           (unsigned long)SWITCH_ARRAY_LENGTH * payload_ints * sizeof(int) / 1024 / 1024);
 
     // 初始化控制器通信
     ctx->controller_fd = -1;
@@ -80,6 +98,25 @@ int switch_context_init(switch_context_t *ctx, int switch_id) {
 void switch_context_cleanup(switch_context_t *ctx) {
     if (!ctx) {
         return;
+    }
+
+    // 释放动态分配的聚合资源
+    if (ctx->aggregator) {
+        for (int i = 0; i < SWITCH_ARRAY_LENGTH; i++) {
+            if (ctx->aggregator[i]) {
+                free(ctx->aggregator[i]);
+            }
+        }
+        free(ctx->aggregator);
+        ctx->aggregator = NULL;
+    }
+    if (ctx->arrival_state) {
+        free(ctx->arrival_state);
+        ctx->arrival_state = NULL;
+    }
+    if (ctx->degree) {
+        free(ctx->degree);
+        ctx->degree = NULL;
     }
 
     // 销毁同步资源

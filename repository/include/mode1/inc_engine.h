@@ -9,8 +9,8 @@ extern "C" {
 #endif
 
 // 聚合槽位数量 - 滑动窗口大小（slot_id % MAX_AGG_SLOTS 复用）
-// 使用较大窗口减少冲突，但不要太大以避免内存浪费
-#define MAX_AGG_SLOTS 131072
+// 1GB 需要 262144 个 slot，设置足够大避免冲突
+#define MAX_AGG_SLOTS 262144
 
 // 归约操作类型
 typedef enum {

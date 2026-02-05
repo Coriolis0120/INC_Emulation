@@ -1,0 +1,5 @@
+INC Reduce Throughput Benchmark Results
+Date: Thu Feb  5 10:18:07 PM CST 2026
+Iterations per size: 10
+
+Size,Iteration,Time(ms),Throughput(Mbps),Status
