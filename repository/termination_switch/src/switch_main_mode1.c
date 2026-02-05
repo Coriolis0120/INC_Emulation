@@ -134,39 +134,33 @@ static void send_to_root_host(uint32_t slot_id, void *data, uint32_t len, int ro
 
     // 每发送一定数量后清理 CQ
     reduce_send_count++;
-    if (reduce_send_count % 1000 == 0) {
+    if (reduce_send_count % 100 == 0) {
         for (int poll = 0; poll < 64; poll++) {
             int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
             if (n <= 0) break;
         }
     }
 
-    // 查找 root_rank 对应的连接
-    // 假设 host_conns[i] 对应 rank i (在同一个 LEAF 下的相对 rank)
-    // 需要根据实际的 rank 映射来确定
-    int found = 0;
+    // 发送给所有 Host，由 Host 端根据 rank 判断是否接收
     for (int i = 0; i < g_roce_ctx->host_count; i++) {
         qp_conn_t *conn = g_roce_ctx->host_conns[i];
         if (conn && conn->is_connected) {
-            // 检查这个连接是否是 root_rank
-            // 由于 LEAF 下的 Host rank 是连续的，我们需要判断
-            // 简化处理：假设 LEAF 下的第 i 个连接对应 rank = base_rank + i
-            // 这里我们直接发送给所有连接，让 Host 端根据 rank 判断是否接收
-            // 更好的方式是在连接时记录每个连接的 rank
-            printf("[send_to_root_host] checking host %d, conn=%p\n", i, (void*)conn);
-            fflush(stdout);
-
-            // 暂时发送给所有 Host，由 Host 端判断
+            // 带重试的发送
             int ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
-            printf("[send_to_root_host] sent to host %d, ret=%d\n", i, ret);
-            fflush(stdout);
-            found = 1;
+            int retry = 0;
+            while (ret != 0 && retry < 100) {
+                // 清理 CQ 后重试
+                for (int poll = 0; poll < 64; poll++) {
+                    int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
+                    if (n <= 0) break;
+                }
+                ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
+                retry++;
+            }
+            if (ret != 0) {
+                printf("[send_to_root_host] FAILED after %d retries, host %d\n", retry, i);
+            }
         }
-    }
-
-    if (!found) {
-        printf("[send_to_root_host] WARNING: no connected host found\n");
-        fflush(stdout);
     }
 }
 
@@ -208,7 +202,7 @@ static void send_to_root_leaf(uint32_t slot_id, void *data, uint32_t len, int ro
         }
 
         // 清理 CQ
-        if (reduce_downlink_count % 1000 == 0) {
+        if (reduce_downlink_count % 100 == 0) {
             for (int poll = 0; poll < 64; poll++) {
                 int n = ibv_poll_cq(dl->send_cq, 64, wc);
                 if (n <= 0) break;
@@ -222,14 +216,23 @@ static void send_to_root_leaf(uint32_t slot_id, void *data, uint32_t len, int ro
         }
         memcpy(dl->send_buf, data, len);
 
-        // 发送给该 LEAF 的所有连接（通常只有一个）
+        // 发送给该 LEAF 的所有连接（通常只有一个），带重试
         for (int i = 0; i < dl->conn_count; i++) {
             qp_conn_t *conn = dl->conns[i];
             if (conn && conn->is_connected) {
                 int ret = downlink_post_send(dl, conn, slot_id, dl->send_buf, len, imm);
-                printf("[send_to_root_leaf] sent to downlink %d conn %d, ret=%d\n",
-                       target_leaf, i, ret);
-                fflush(stdout);
+                int retry = 0;
+                while (ret != 0 && retry < 100) {
+                    for (int poll = 0; poll < 64; poll++) {
+                        int n = ibv_poll_cq(dl->send_cq, 64, wc);
+                        if (n <= 0) break;
+                    }
+                    ret = downlink_post_send(dl, conn, slot_id, dl->send_buf, len, imm);
+                    retry++;
+                }
+                if (ret != 0) {
+                    printf("[send_to_root_leaf] FAILED after %d retries\n", retry);
+                }
             }
         }
         return;
@@ -273,7 +276,7 @@ static void broadcast_to_hosts(uint32_t slot_id, void *data, uint32_t len) {
 
     // 每发送一定数量后清理 CQ，防止队列满
     send_count++;
-    if (send_count % 1000 == 0) {
+    if (send_count % 100 == 0) {
         // 多次轮询确保有足够空间
         for (int poll = 0; poll < 64; poll++) {
             int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
@@ -285,11 +288,18 @@ static void broadcast_to_hosts(uint32_t slot_id, void *data, uint32_t len) {
         qp_conn_t *conn = g_roce_ctx->host_conns[i];
         if (conn && conn->is_connected) {
             int ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
-            printf("[broadcast_to_hosts] sent to host %d, ret=%d\n", i, ret);
-            fflush(stdout);
-        } else {
-            printf("[broadcast_to_hosts] host %d not connected\n", i);
-            fflush(stdout);
+            int retry = 0;
+            while (ret != 0 && retry < 100) {
+                for (int poll = 0; poll < 64; poll++) {
+                    int n = ibv_poll_cq(g_roce_ctx->send_cq, 64, wc);
+                    if (n <= 0) break;
+                }
+                ret = qp_post_send(g_roce_ctx, conn, slot_id, g_roce_ctx->send_buf, len, imm);
+                retry++;
+            }
+            if (ret != 0) {
+                printf("[broadcast_to_hosts] FAILED after %d retries, host %d\n", retry, i);
+            }
         }
     }
 }
@@ -313,7 +323,7 @@ static void forward_to_parent_ex(uint32_t slot_id, void *data, uint32_t len,
     struct ibv_wc wc[64];
     static int uplink_send_count = 0;
     uplink_send_count++;
-    if (uplink_send_count % 1000 == 0) {
+    if (uplink_send_count % 100 == 0) {
         for (int poll = 0; poll < 64; poll++) {
             int n = ibv_poll_cq(uplink->send_cq, 64, wc);
             if (n <= 0) break;
@@ -341,8 +351,18 @@ static void forward_to_parent_ex(uint32_t slot_id, void *data, uint32_t len,
     memcpy(uplink->send_buf, data, len);
 
     int ret = uplink_post_send(uplink, slot_id, uplink->send_buf, len, imm);
-    printf("[forward_to_parent_ex] sent slot=%u, ret=%d\n", slot_id, ret);
-    fflush(stdout);
+    int retry = 0;
+    while (ret != 0 && retry < 100) {
+        for (int poll = 0; poll < 64; poll++) {
+            int n = ibv_poll_cq(uplink->send_cq, 64, wc);
+            if (n <= 0) break;
+        }
+        ret = uplink_post_send(uplink, slot_id, uplink->send_buf, len, imm);
+        retry++;
+    }
+    if (ret != 0) {
+        printf("[forward_to_parent_ex] FAILED after %d retries\n", retry);
+    }
 }
 
 // 兼容旧接口
@@ -377,7 +397,7 @@ static void broadcast_to_children(uint32_t slot_id, void *data, uint32_t len) {
             fflush(stdout);
 
             // 每发送一定数量后清理 CQ，防止队列满
-            if (downlink_send_count % 1000 == 0) {
+            if (downlink_send_count % 100 == 0) {
                 for (int poll = 0; poll < 64; poll++) {
                     int n = ibv_poll_cq(dl->send_cq, 64, wc);
                     if (n <= 0) break;
@@ -395,11 +415,18 @@ static void broadcast_to_children(uint32_t slot_id, void *data, uint32_t len) {
                 qp_conn_t *conn = dl->conns[i];
                 if (conn && conn->is_connected) {
                     int ret = downlink_post_send(dl, conn, slot_id, dl->send_buf, len, imm);
-                    printf("[broadcast_to_children] sent to downlink %d conn %d, ret=%d\n", d, i, ret);
-                    fflush(stdout);
-                } else {
-                    printf("[broadcast_to_children] downlink %d conn %d not connected\n", d, i);
-                    fflush(stdout);
+                    int retry = 0;
+                    while (ret != 0 && retry < 100) {
+                        for (int poll = 0; poll < 64; poll++) {
+                            int n = ibv_poll_cq(dl->send_cq, 64, wc);
+                            if (n <= 0) break;
+                        }
+                        ret = downlink_post_send(dl, conn, slot_id, dl->send_buf, len, imm);
+                        retry++;
+                    }
+                    if (ret != 0) {
+                        printf("[broadcast_to_children] FAILED after %d retries\n", retry);
+                    }
                 }
             }
         }
@@ -462,8 +489,10 @@ static void *message_loop(void *arg) {
                            d, slot_id, prim, from_child, len, rank);
                     fflush(stdout);
 
-                    // 使用设备索引作为 conn_id（0, 1, 2...），避免位图溢出
-                    int complete = inc_engine_submit(slot_id, from_child ? d : rank,
+                    // 对于 ROOT，conn_id 应该是 downlink 索引 d
+                    // AllReduce: from_child=1 (rank=0xFF), 用 d
+                    // Reduce: from_child=0 (rank=root_rank), 也应该用 d
+                    int complete = inc_engine_submit(slot_id, d,
                                                      data, len, prim, op, dtype, g_expected_children);
                     if (complete == 1) {
                         uint32_t result_len;
