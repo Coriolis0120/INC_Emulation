@@ -152,6 +152,8 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
                       data_type_t dtype, int expected) {
     agg_slot_t *slot = get_slot(slot_id);
     if (!slot) {
+        printf("[IncEngine] ERROR: get_slot(%u) returned NULL\n", slot_id);
+        fflush(stdout);
         return -1;
     }
 
@@ -159,6 +161,9 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
 
     // 滑动窗口：检查是否是新的 slot_id（复用旧槽位）
     if (slot->state != SLOT_IDLE && slot->original_slot_id != slot_id) {
+        printf("[IncEngine] Slot %u reused (was %u), resetting\n",
+               slot_id, slot->original_slot_id);
+        fflush(stdout);
         // 旧 slot 被复用，强制重置
         slot->state = SLOT_IDLE;
         slot->arrived_count = 0;
@@ -171,6 +176,9 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
 
     if (slot->state == SLOT_IDLE) {
         // 第一个消息，初始化槽位
+        printf("[IncEngine] Slot %u: first msg from conn %d, expected=%d\n",
+               slot_id, conn_id, expected);
+        fflush(stdout);
         slot->original_slot_id = slot_id;
         slot->state = SLOT_AGGREGATING;
         slot->primitive = prim;
@@ -194,6 +202,9 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
         memcpy(slot->agg_buffer, data, len);
     } else {
         // 后续消息，执行归约
+        printf("[IncEngine] Slot %u: msg from conn %d, arrived=%u/%u\n",
+               slot_id, conn_id, slot->arrived_count + 1, slot->expected_count);
+        fflush(stdout);
         uint32_t reduce_len = (len < slot->data_len) ? len : slot->data_len;
         do_reduce(slot->agg_buffer, data, reduce_len, op, dtype);
         slot->arrived_count++;
@@ -203,6 +214,8 @@ int inc_engine_submit(uint32_t slot_id, int conn_id,
     int complete = (slot->arrived_count >= slot->expected_count);
     if (complete) {
         slot->state = SLOT_COMPLETE;
+        printf("[IncEngine] Slot %u complete: arrived=%u, expected=%u\n",
+               slot_id, slot->arrived_count, slot->expected_count);
     }
 
     pthread_mutex_unlock(&slot->mutex);

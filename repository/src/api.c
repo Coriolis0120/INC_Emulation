@@ -874,6 +874,177 @@ void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data
     free(wc);
 }
 
+/**
+ * @brief 简化版 AllReduce - 无控制包，直接发送数据
+ * 用于 non_termination_switch 测试
+ */
+void inccl_allreduce_simple(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data) {
+    int receive_num = 0;
+    int send_num = 0;
+    int message_num = (len + PAYLOAD_COUNT - 1) / PAYLOAD_COUNT;
+
+    printf("AllReduce_Simple: len=%u, message_num=%d\n", len, message_num);
+    fflush(stdout);
+
+    // 滑动窗口大小
+    int window_size = SLIDING_WINDOW_SIZE < message_num ? SLIDING_WINDOW_SIZE : message_num;
+    int posted_recv = 0;
+
+    printf("AllReduce_Simple: window_size=%d, SLIDING_WINDOW_SIZE=%d\n", window_size, SLIDING_WINDOW_SIZE);
+    fflush(stdout);
+
+    struct ibv_recv_wr rr;
+    struct ibv_sge receive_sge;
+    struct ibv_recv_wr *receive_bad_wr;
+
+    // 步骤1：预先提交接收请求
+    for(int i = 0; i < window_size; i++) {
+        memset(&receive_sge, 0, sizeof(receive_sge));
+        receive_sge.addr = (uintptr_t)(comm->receive_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
+        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+        receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+        memset(&rr, 0, sizeof(rr));
+        rr.wr_id = i;
+        rr.sg_list = &receive_sge;
+        rr.num_sge = 1;
+
+        ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+        posted_recv++;
+    }
+
+    // 步骤2：准备发送数据
+    int32_t *send_buffer = (int32_t*)comm->send_payload;
+    for(int i = 0; i < message_num; i++) {
+        int32_t *msg_buffer = send_buffer + i * PAYLOAD_COUNT;
+        for(int j = 0; j < PAYLOAD_COUNT; j++) {
+            int src_idx = i * PAYLOAD_COUNT + j;
+            msg_buffer[j] = (src_idx < (int)len) ? htonl(src_data[src_idx]) : 0;
+        }
+    }
+
+    // 步骤3：发送初始窗口
+    struct ibv_send_wr wr;
+    struct ibv_sge send_sge;
+    struct ibv_send_wr *send_bad_wr;
+
+    for(int i = 0; i < window_size; i++) {
+        memset(&send_sge, 0, sizeof(send_sge));
+        send_sge.addr = (uintptr_t)(comm->send_payload + i * PAYLOAD_COUNT * sizeof(int32_t));
+        send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+        send_sge.lkey = comm->mr_send_payload->lkey;
+
+        memset(&wr, 0, sizeof(wr));
+        wr.wr_id = i;
+        wr.sg_list = &send_sge;
+        wr.num_sge = 1;
+        wr.send_flags = IBV_SEND_SIGNALED;
+        wr.opcode = IBV_WR_SEND;
+
+        ibv_post_send(comm->qp, &wr, &send_bad_wr);
+        send_num++;
+    }
+
+    // 步骤4：轮询完成队列
+    struct ibv_wc *wc = (struct ibv_wc *)malloc(sizeof(struct ibv_wc) * message_num);
+    struct timeval start_time, current_time;
+    gettimeofday(&start_time, NULL);
+
+    while(receive_num != message_num) {
+        gettimeofday(&current_time, NULL);
+        uint64_t elapsed_us = (current_time.tv_sec - start_time.tv_sec) * 1000000 +
+                              (current_time.tv_usec - start_time.tv_usec);
+
+        if(elapsed_us > POLL_TIMEOUT_US) {
+            printf("AllReduce_Simple: TIMEOUT! recv=%d/%d, send=%d, posted_recv=%d\n",
+                   receive_num, message_num, send_num, posted_recv);
+            free(wc);
+            return;
+        }
+
+        // 每10秒打印一次进度
+        static uint64_t last_progress_us = 0;
+        if(elapsed_us - last_progress_us > 10000000) {
+            printf("AllReduce_Simple: Progress recv=%d/%d, send=%d, posted_recv=%d, elapsed=%lu us\n",
+                   receive_num, message_num, send_num, posted_recv, elapsed_us);
+            fflush(stdout);
+            last_progress_us = elapsed_us;
+        }
+
+        int result = ibv_poll_cq(comm->cq, message_num, wc);
+        if(result > 0) {
+            for(int i = 0; i < result; i++) {
+                struct ibv_wc *tmp = wc + i;
+
+                if(tmp->status == IBV_WC_SUCCESS &&
+                   (tmp->opcode == IBV_WC_RECV || tmp->opcode == IBV_WC_RECV_RDMA_WITH_IMM)) {
+                    uint64_t idx = tmp->wr_id;
+                    int slot = idx % window_size;
+                    int *pack = (int *)(comm->receive_payload + slot * PAYLOAD_COUNT * sizeof(int32_t));
+
+                    // 每100个消息打印一次
+                    if(receive_num % 100 == 0) {
+                        printf("AllReduce_Simple: recv msg %d, wr_id=%lu, slot=%d\n",
+                               receive_num, idx, slot);
+                        fflush(stdout);
+                    }
+
+                    for(int j = 0; j < PAYLOAD_COUNT; ++j) {
+                        int dst_idx = idx * PAYLOAD_COUNT + j;
+                        if(dst_idx < (int)len) {
+                            dst_data[dst_idx] = ntohl(pack[j]);
+                        }
+                    }
+                    receive_num++;
+
+                    // 滑动窗口：补充接收请求
+                    if(posted_recv < message_num) {
+                        int new_slot = posted_recv % window_size;
+                        memset(&receive_sge, 0, sizeof(receive_sge));
+                        receive_sge.addr = (uintptr_t)(comm->receive_payload + new_slot * PAYLOAD_COUNT * sizeof(int32_t));
+                        receive_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+                        receive_sge.lkey = comm->mr_receive_payload->lkey;
+
+                        memset(&rr, 0, sizeof(rr));
+                        rr.wr_id = posted_recv;
+                        rr.sg_list = &receive_sge;
+                        rr.num_sge = 1;
+
+                        ibv_post_recv(comm->qp, &rr, &receive_bad_wr);
+                        posted_recv++;
+                    }
+
+                    // 滑动窗口：补充发送请求
+                    if(send_num < message_num) {
+                        int new_slot = send_num % window_size;
+                        memset(&send_sge, 0, sizeof(send_sge));
+                        send_sge.addr = (uintptr_t)(comm->send_payload + send_num * PAYLOAD_COUNT * sizeof(int32_t));
+                        send_sge.length = PAYLOAD_COUNT * sizeof(int32_t);
+                        send_sge.lkey = comm->mr_send_payload->lkey;
+
+                        memset(&wr, 0, sizeof(wr));
+                        wr.wr_id = send_num;
+                        wr.sg_list = &send_sge;
+                        wr.num_sge = 1;
+                        wr.send_flags = IBV_SEND_SIGNALED;
+                        wr.opcode = IBV_WR_SEND;
+
+                        ibv_post_send(comm->qp, &wr, &send_bad_wr);
+                        send_num++;
+                    }
+                } else if(tmp->status != IBV_WC_SUCCESS) {
+                    printf("AllReduce_Simple: ERROR status=%d\n", tmp->status);
+                    free(wc);
+                    return;
+                }
+            }
+        }
+    }
+
+    printf("AllReduce_Simple: Completed, recv=%d\n", message_num);
+    free(wc);
+}
+
 /* AllReduce操作：使用RDMA WRITE语义（单边RDMA）
  * comm: communicator对象
  * src_data: 源数据数组

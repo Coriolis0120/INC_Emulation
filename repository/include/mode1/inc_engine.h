@@ -9,7 +9,8 @@ extern "C" {
 #endif
 
 // 聚合槽位数量 - 滑动窗口大小（slot_id % MAX_AGG_SLOTS 复用）
-#define MAX_AGG_SLOTS 8192
+// 512MB / 4KB = 131072 消息，使用滑动窗口复用
+#define MAX_AGG_SLOTS 65536
 
 // 归约操作类型
 typedef enum {

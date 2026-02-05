@@ -1,9 +1,8 @@
 /**
  * @file controller_comm.cpp
- * @brief 交换机与控制器通信模块实现（简化版）
+ * @brief 交换机与控制器通信模块实现
  *
- * 简化协议：连接后直接接收 YAML 配置
- * 格式：4字节长度(网络字节序) + YAML内容
+ * 协议格式：1字节命令(CMD_SET_CONNECTIONS=4) + 4字节长度(网络字节序) + YAML内容
  */
 
 #include <yaml-cpp/yaml.h>
@@ -82,15 +81,17 @@ static int parse_connections(switch_context_t *ctx, const YAML::Node& connection
                    &conn->peer_mac[3], &conn->peer_mac[4], &conn->peer_mac[5]);
         }
 
+        // 解析 is_switch 字段
+        conn->is_switch = conn_node["is_switch"].as<bool>(false) ? 1 : 0;
 
-        printf("[YAML] Connection %d: %s (%s) <-> %s\n",
-               conn_id, my_name.c_str(), my_ip.c_str(), peer_ip.c_str());
+        printf("[YAML] Connection %d: %s (%s) <-> %s, is_switch=%d\n",
+               conn_idx, my_name.c_str(), my_ip.c_str(), peer_ip.c_str(), conn->is_switch);
 
         conn_idx++;
     }
 
     ctx->fan_in = conn_idx;
-    printf("[YAML] Total connections parsed: %d (host: %d)\n", conn_idx, host_conn_count);
+    printf("[YAML] Total connections parsed: %d\n", conn_idx);
     return 0;
 }
 
@@ -135,6 +136,22 @@ static int parse_rules(switch_context_t *ctx, const YAML::Node& rules) {
                 }
             }
             rule.out_conns_cnt = out_idx;
+        }
+
+        // 解析 in_conns 数组并计算 bitmap_mask
+        if (rule_node["in_conns"] && rule_node["in_conns"].IsSequence()) {
+            for (const auto& in_conn : rule_node["in_conns"]) {
+                int conn_id = in_conn.as<int>(-1);
+                if (conn_id >= 0 && conn_id < MAX_CONNECTIONS_NUM) {
+                    ctx->bitmap_mask |= (1 << conn_id);
+                }
+            }
+        }
+
+        // 解析 root 字段来确定 root_conn
+        if (rule_node["root"] && rule_node["root"].as<bool>(false)) {
+            // 如果这条规则标记为 root，则 out_conns 中的连接是下游
+            // root_conn 应该是上游连接（对于非 spine）
         }
 
         // 添加到路由表
@@ -198,10 +215,47 @@ static int parse_yaml_config(switch_context_t *ctx, const char *yaml_buffer) {
 
         // 4. 解析 rules
         printf("[YAML] Parsing rules...\n");
+        // 清空 bitmap_mask，将在 parse_rules 中从 in_conns 计算
+        ctx->bitmap_mask = 0;
         if (parse_rules(ctx, switch_node["rules"]) < 0) {
             fprintf(stderr, "[YAML] Error: Failed to parse rules\n");
             return -1;
         }
+
+        // 5. 计算 root_conn
+        // 对于非 Spine 交换机，root_conn 是连接到父交换机的连接（is_switch=true）
+        if (!ctx->is_spine) {
+            ctx->root_conn = -1;
+            for (int i = 0; i < ctx->fan_in; i++) {
+                if (ctx->conns[i].is_switch) {
+                    ctx->root_conn = i;
+                    break;
+                }
+            }
+        } else {
+            ctx->root_conn = -1;  // Spine 没有上游
+        }
+
+        printf("[YAML] Computed: bitmap_mask=0x%x, root_conn=%d\n",
+               ctx->bitmap_mask, ctx->root_conn);
+
+        // 6. 计算 ctrl_expected_bitmap（主机连接的位图）
+        ctx->ctrl_expected_bitmap = 0;
+        ctx->ctrl_arrival_bitmap = 0;
+        ctx->ctrl_confirmed = 0;
+        for (int i = 0; i < ctx->fan_in; i++) {
+            if (!ctx->conns[i].is_switch) {
+                ctx->ctrl_expected_bitmap |= (1 << i);
+            }
+        }
+        printf("[YAML] ctrl_expected_bitmap=0x%x (host connections)\n",
+               ctx->ctrl_expected_bitmap);
+
+        // 7. 发送配置就绪信号
+        pthread_mutex_lock(&ctx->config_mutex);
+        ctx->config_ready = 1;
+        pthread_cond_signal(&ctx->config_cond);
+        pthread_mutex_unlock(&ctx->config_mutex);
 
         printf("[YAML] ========== YAML parsing complete ==========\n");
         return 0;
@@ -259,6 +313,7 @@ int controller_connect(switch_context_t *ctx, const char *controller_ip, int con
  * @brief 接收一次 YAML 配置
  *
  * 协议：4字节长度(网络字节序) + YAML内容
+ * (与 controller.cpp 中的 send_yaml_to_switch 协议一致)
  *
  * @param ctx 交换机上下文
  * @param sockfd socket 文件描述符
@@ -335,7 +390,7 @@ void *controller_thread(void *arg) {
             continue;
         }
 
-        printf("[Controller] Config applied, num_receivers=%d\n", ctx->num_receivers);
+        printf("[Controller] Config applied, fan_in=%d\n", ctx->fan_in);
     }
 
     printf("[Controller] Communication thread exited\n");
@@ -349,7 +404,7 @@ void *controller_thread(void *arg) {
  * @brief 连接到控制器并启动通信线程
  */
 int controller_init(switch_context_t *ctx, const char *controller_ip) {
-    TS_PRINTF("Connecting to controller...\n");
+    printf("Connecting to controller...\n");
 
     if (controller_connect(ctx, controller_ip, CONTROLLER_SWITCH_PORT) < 0) {
         fprintf(stderr, "Failed to connect to controller\n");
@@ -363,6 +418,6 @@ int controller_init(switch_context_t *ctx, const char *controller_ip) {
     }
     pthread_detach(controller_tid);
 
-    TS_PRINTF("Controller connection established\n");
+    printf("Controller connection established\n");
     return 0;
 }

@@ -9,8 +9,8 @@
 
 // SWITCH 相关
 #define MAX_CONNECTIONS_NUM 10
-#define SWITCH_ARRAY_LENGTH (WINDOW_SIZE * 2)  // 支持512MB测试 (静态分配最大值)
-#define WINDOW_SIZE (65536) // window size 
+#define WINDOW_SIZE (131072) // window size - 支持128MB测试 (131072 PSN)
+#define SWITCH_ARRAY_LENGTH (WINDOW_SIZE * 2)  // 支持256MB测试 
 #define MAX_PORT_NUM 10
 #define MAX_EVENTS (MAX_PORT_NUM*4)
 

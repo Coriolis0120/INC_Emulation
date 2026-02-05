@@ -141,6 +141,7 @@ typedef struct {
     uint32_t psn; // 用于记录该connection下一个发送的包的psn
     uint32_t msn; // 用于记录max sequence number
 
+    int is_switch;  // 对端是否是交换机
 
     pcap_t *handle;       // 接收用 pcap handle
 

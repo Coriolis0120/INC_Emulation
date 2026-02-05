@@ -434,7 +434,7 @@ void qp_conn_print(qp_conn_t *conn) {
 
 // ============ 上行连接 (Leaf -> Spine) ============
 
-// 增加上行缓冲区以支持更大数据量 (8192 slots)
+// 上行缓冲区使用滑动窗口复用 (8192 slots)
 #define UPLINK_BUF_SLOTS 8192
 #define UPLINK_BUF_SIZE ((size_t)UPLINK_BUF_SLOTS * 64 * 1024)  // 8192 * 64KB = 512MB
 
@@ -472,8 +472,8 @@ uplink_ctx_t *uplink_ctx_init(const char *dev_name, int gid_idx) {
     uplink->pd = ibv_alloc_pd(uplink->ctx);
     if (!uplink->pd) goto err_close;
 
-    uplink->recv_cq = ibv_create_cq(uplink->ctx, 8192, NULL, NULL, 0);
-    uplink->send_cq = ibv_create_cq(uplink->ctx, 8192, NULL, NULL, 0);
+    uplink->recv_cq = ibv_create_cq(uplink->ctx, 16384, NULL, NULL, 0);
+    uplink->send_cq = ibv_create_cq(uplink->ctx, 16384, NULL, NULL, 0);
     if (!uplink->recv_cq || !uplink->send_cq) goto err_pd;
 
     uplink->recv_buf = malloc(uplink->buf_size);
@@ -673,7 +673,7 @@ int uplink_poll_recv_cq(uplink_ctx_t *uplink, struct ibv_wc *wc, int max_wc) {
 // ============ 下行连接 (Spine -> Leaf) ============
 
 // 支持最多 MAX_SWITCHES 个连接，每个连接 RECV_BUF_PER_CONN 个槽位
-// RECV_BUF_PER_CONN=8192, MAX_SWITCHES=8 -> 65536 slots
+// RECV_BUF_PER_CONN=16384, MAX_SWITCHES=8 -> 131072 slots
 // 每个 slot 64KB -> 总共 4GB (需要 size_t 类型)
 #define DOWNLINK_BUF_SLOTS (RECV_BUF_PER_CONN * MAX_SWITCHES)
 #define DOWNLINK_BUF_SIZE ((size_t)DOWNLINK_BUF_SLOTS * 65536ULL)
@@ -712,8 +712,8 @@ downlink_ctx_t *downlink_ctx_init(const char *dev_name, int gid_idx) {
     downlink->pd = ibv_alloc_pd(downlink->ctx);
     if (!downlink->pd) goto err_close;
 
-    downlink->recv_cq = ibv_create_cq(downlink->ctx, 8192, NULL, NULL, 0);
-    downlink->send_cq = ibv_create_cq(downlink->ctx, 8192, NULL, NULL, 0);
+    downlink->recv_cq = ibv_create_cq(downlink->ctx, 32767, NULL, NULL, 0);
+    downlink->send_cq = ibv_create_cq(downlink->ctx, 32767, NULL, NULL, 0);
     if (!downlink->recv_cq || !downlink->send_cq) goto err_pd;
 
     downlink->recv_buf = malloc(downlink->buf_size);

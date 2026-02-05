@@ -110,6 +110,13 @@ if(OPT_FLAGS)
     target_compile_options(host_simple_test PRIVATE ${OPT_FLAGS})
 endif()
 
+# host_simple_test_v2 (无控制包版本，用于non_termination_switch)
+add_executable(host_simple_test_v2 src/host_simple_test_v2.c ${COMMON_SRCS} ${CONFIG_PARSER})
+target_link_libraries(host_simple_test_v2 ibverbs pthread pcap ${YAML_CPP_STATIC})
+if(OPT_FLAGS)
+    target_compile_options(host_simple_test_v2 PRIVATE ${OPT_FLAGS})
+endif()
+
 # host_broadcast (Broadcast测试)
 add_executable(host_broadcast src/host_broadcast.c ${COMMON_SRCS} ${CONFIG_PARSER})
 target_link_libraries(host_broadcast ibverbs pthread pcap ${YAML_CPP_STATIC})
@@ -156,4 +163,12 @@ add_executable(host_mode1
 target_link_libraries(host_mode1 mode1 ibverbs pthread)
 if(OPT_FLAGS)
     target_compile_options(host_mode1 PRIVATE ${OPT_FLAGS})
+endif()
+
+# host_reduce_mode1 Reduce测试程序
+add_executable(host_reduce_mode1
+    src/mode1/host_reduce_test.c)
+target_link_libraries(host_reduce_mode1 mode1 ibverbs pthread)
+if(OPT_FLAGS)
+    target_compile_options(host_reduce_mode1 PRIVATE ${OPT_FLAGS})
 endif()

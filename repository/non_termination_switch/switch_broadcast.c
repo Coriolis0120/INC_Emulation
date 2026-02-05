@@ -36,24 +36,24 @@
 static switch_context_t ctx;
 static packet_metadata_t meta;
 
-static void init_devices(const char *controller_ip) {
+static void init_devices(void) {
 
     // for each port
-    for(int i = 0; i < FAN_IN; i++) {
-        
+    for(int i = 0; i < ctx.fan_in; i++) {
+
         char errbuf[PCAP_ERRBUF_SIZE];
-        conns[i].handle = pcap_create(conns[i].device, errbuf);
-        pcap_set_snaplen(conns[i].handle, BUFSIZ);
-        pcap_set_promisc(conns[i].handle, 1);
-        pcap_set_timeout(conns[i].handle, 1);  // 1ms timeout
-        pcap_set_immediate_mode(conns[i].handle, 1);
-        pcap_setnonblock(conns[i].handle, 1, errbuf);
-        if (pcap_activate(conns[i].handle) != 0) {
-            fprintf(stderr, "pcap_activate failed: %s\n", pcap_geterr(conns[i].handle));
+        ctx.conns[i].handle = pcap_create(ctx.conns[i].device, errbuf);
+        pcap_set_snaplen(ctx.conns[i].handle, BUFSIZ);
+        pcap_set_promisc(ctx.conns[i].handle, 1);
+        pcap_set_timeout(ctx.conns[i].handle, 1);  // 1ms timeout
+        pcap_set_immediate_mode(ctx.conns[i].handle, 1);
+        pcap_setnonblock(ctx.conns[i].handle, 1, errbuf);
+        if (pcap_activate(ctx.conns[i].handle) != 0) {
+            fprintf(stderr, "pcap_activate failed: %s\n", pcap_geterr(ctx.conns[i].handle));
             return;
         }
-        if (conns[i].handle == NULL) {
-            fprintf(stderr, "Could not open device: %s, err: %s\n", conns[i].device, errbuf);
+        if (ctx.conns[i].handle == NULL) {
+            fprintf(stderr, "Could not open device: %s, err: %s\n", ctx.conns[i].device, errbuf);
             return;
         }
 
@@ -62,30 +62,30 @@ static void init_devices(const char *controller_ip) {
         char ip_str[INET_ADDRSTRLEN];
         
         // RoCEv2 filter
-        if (!inet_ntop(AF_INET, &(conns[i].peer_ip), ip_str, sizeof(ip_str))) {
+        if (!inet_ntop(AF_INET, &(ctx.conns[i].peer_ip), ip_str, sizeof(ip_str))) {
             perror("inet_ntop failed");
             continue;
         }
-        
-        printf("port %d: device: %s\n",i, conns[i].device);
+
+        printf("port %d: device: %s\n",i, ctx.conns[i].device);
         snprintf(filter_exp, sizeof(filter_exp), "udp port 4791 and src host %s", ip_str);
 
-        if (pcap_compile(conns[i].handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
-            fprintf(stderr, "Filter error: %s\n", pcap_geterr(conns[i].handle));
+        if (pcap_compile(ctx.conns[i].handle, &fp, filter_exp, 0, PCAP_NETMASK_UNKNOWN) == -1) {
+            fprintf(stderr, "Filter error: %s\n", pcap_geterr(ctx.conns[i].handle));
             continue;
         }
-        
-        if (pcap_setfilter(conns[i].handle, &fp) == -1) {
-            fprintf(stderr, "Set filter error: %s\n", pcap_geterr(conns[i].handle));
+
+        if (pcap_setfilter(ctx.conns[i].handle, &fp) == -1) {
+            fprintf(stderr, "Set filter error: %s\n", pcap_geterr(ctx.conns[i].handle));
             pcap_freecode(&fp);
             continue;
         }
         pcap_freecode(&fp);
 
         // add fd into epoll
-        int fd = pcap_get_selectable_fd(conns[i].handle);
+        int fd = pcap_get_selectable_fd(ctx.conns[i].handle);
         if (fd == -1) {
-            fprintf(stderr, "Cannot get selectable file descriptor for %s\n", conns[i].device);
+            fprintf(stderr, "Cannot get selectable file descriptor for %s\n", ctx.conns[i].device);
             continue;
         }
         
@@ -104,14 +104,14 @@ static void init_devices(const char *controller_ip) {
 
 }
 
-static void broadcast_roce_data(metadata_t *meta_p){
+static void broadcast_roce_data(packet_metadata_t *meta_p){
     int size = 58 + PAYLOAD_LEN;
     uint8_t *packet = (uint8_t *)meta_p->header.eth;
 
-    for(int i = 0; i < ctx->fan_in; i++){
-        if(!(ctx->bitmap_mask & MASK_CONN(i)))
+    for(int i = 0; i < ctx.fan_in; i++){
+        if(!(ctx.bitmap_mask & MASK_CONN(i)))
             continue;
-        connection_t *conn = conns + i;
+        connection_t *conn = &ctx.conns[i];
 
         memcpy(meta_p->header.eth->dst_mac, conn->peer_mac, 6);
         memcpy(meta_p->header.eth->src_mac, conn->my_mac, 6);
@@ -134,8 +134,8 @@ static void broadcast_roce_data(metadata_t *meta_p){
     }
 }
 
-static void send_roce_ack(uint32_t conn_id, metadata_t *meta_p){
-    connection_t *conn = conns + conn_id;
+static void send_roce_ack(uint32_t conn_id, packet_metadata_t *meta_p){
+    connection_t *conn = &ctx.conns[conn_id];
     int size = 62;
     uint8_t *packet = (uint8_t *)meta_p->header.eth;
 
@@ -161,13 +161,13 @@ static void send_roce_ack(uint32_t conn_id, metadata_t *meta_p){
 
 static inline void clear_state_data(uint32_t psn){
     uint32_t idx = Idx(psn + WINDOW_SIZE);
-    ctx->arrival_state[idx] = 0;
+    ctx.arrival_state[idx] = 0;
 }
 
 /**
  * simulation of p4 switch — broadcast mode
  */
-void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_t *packet) {
+void pipeline(packet_metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_t *packet) {
 
     // parser: extract header info
     printf("[PIPELINE] Starting packet processing, ingress_conn=%d\n", meta_p->ingress_conn);
@@ -204,14 +204,14 @@ void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_
         // DATA 来自 root，检查 epsn 后直接广播
         printf("[PIPELINE] Processing DATA packet, PSN=%u\n", meta_p->psn);
         fflush(stdout);
-        if((ctx->data_epsn[meta_p->ingress_conn] != meta_p->psn)
-            &&(!(ctx->arrival_state[idx] & MASK_CONN(meta_p->ingress_conn)))){
+        if((ctx.data_epsn[meta_p->ingress_conn] != meta_p->psn)
+            &&(!(ctx.arrival_state[idx] & MASK_CONN(meta_p->ingress_conn)))){
             return; // 超前epsn，丢弃
         }
 
-        ctx->arrival_state[idx] |= MASK_CONN(meta_p->ingress_conn);
+        ctx.arrival_state[idx] |= MASK_CONN(meta_p->ingress_conn);
         clear_state_data(meta_p->psn);
-        ctx->data_epsn[meta_p->ingress_conn]++;
+        ctx.data_epsn[meta_p->ingress_conn]++;
         broadcast_roce_data(meta_p);
 
         printf("[PIPELINE] DATA: broadcast completed, PSN=%u\n", meta_p->psn);
@@ -222,21 +222,27 @@ void pipeline(metadata_t *meta_p, const struct pcap_pkthdr *pkthdr, const uint8_
         printf("[PIPELINE] Processing ACK packet, PSN=%u, from port=%d\n", meta_p->psn, meta_p->ingress_conn);
         fflush(stdout);
 
-        ctx->acked_psn[meta_p->ingress_conn] = meta_p->psn;
+        ctx.acked_psn[meta_p->ingress_conn] = meta_p->psn;
 
-        // 取 bitmap 中所有 port 的 acked_psn 最小值作为回给 root 的 ACK PSN
-        uint32_t min_psn = 0x7fffffff;
-        for(int i = 0; i < ctx->fan_in; i++){
-            if(!(ctx->bitmap_mask & MASK_CONN(i)))
-                continue;
-            if(ctx->acked_psn[i] < min_psn)
-                min_psn = ctx->acked_psn[i];
+        // Spine 不需要转发 ACK（它是广播源头）
+        if(ctx.is_spine) {
+            printf("[PIPELINE] ACK: Spine received ACK, PSN=%u (no forwarding)\n", meta_p->psn);
+            fflush(stdout);
+        } else {
+            // Leaf: 取 bitmap 中所有 port 的 acked_psn 最小值作为回给 root 的 ACK PSN
+            uint32_t min_psn = 0x7fffffff;
+            for(int i = 0; i < ctx.fan_in; i++){
+                if(!(ctx.bitmap_mask & MASK_CONN(i)))
+                    continue;
+                if(ctx.acked_psn[i] < min_psn)
+                    min_psn = ctx.acked_psn[i];
+            }
+
+            meta_p->psn = min_psn;
+            send_roce_ack(ctx.root_conn, meta_p);
+            printf("[PIPELINE] ACK: sent ACK to root, min_PSN=%u\n", min_psn);
+            fflush(stdout);
         }
-
-        meta_p->psn = min_psn;
-        send_roce_ack(ctx->root_conn, meta_p);
-        printf("[PIPELINE] ACK: sent ACK to root, min_PSN=%u\n", min_psn);
-        fflush(stdout);
 
     }
 
@@ -262,10 +268,10 @@ void epoll_process_packets(){
         }
 
         for (int i = 0; i < nfds; ++i) {
-            memset(meta, 0, sizeof(packet_metadata_t));
+            memset(&meta, 0, sizeof(packet_metadata_t));
             meta.ingress_conn = events[i].data.u32;
-            
-            while ((pcap_next_ex(conns[meta.ingress_conn].handle, &pkthdr, &packet)) == 1) {
+
+            while ((pcap_next_ex(ctx.conns[meta.ingress_conn].handle, &pkthdr, &packet)) == 1) {
                 printf("recv packet from port %d\n",meta.ingress_conn);
                 fflush(stdout);
                 pipeline(&meta, pkthdr, packet);
@@ -278,20 +284,28 @@ void epoll_process_packets(){
  * @brief 主函数
  */
 int main(int argc, char *argv[]) {
+    // 禁用 stdout/stderr 缓冲，确保日志实时输出
+    setbuf(stdout, NULL);
+    setbuf(stderr, NULL);
+
     char *controller_ip = "192.168.0.3";
+    int switch_id = 0;
 
     if (argc >= 2) {
         controller_ip = argv[1];
     }
+    if (argc >= 3) {
+        switch_id = atoi(argv[2]);
+    }
 
-    TS_PRINTF("=== INC Switch (Refactored Version) ===\n");
-    TS_PRINTF("Controller IP: %s\n", controller_ip);
+    printf("=== INC Switch Broadcast (Non-Termination) ===\n");
+    printf("Controller IP: %s, Switch ID: %d\n", controller_ip, switch_id);
 
     // 初始化 CRC32 表
     init_crc32_table();
 
     // 初始化交换机上下文
-    if (switch_context_init(&ctx, 0, 4) < 0) {
+    if (switch_context_init(&ctx, switch_id) < 0) {
         fprintf(stderr, "Failed to initialize switch context\n");
         return 1;
     }
@@ -305,8 +319,18 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    TS_PRINTF("Switch started successfully\n");
-    TS_PRINTF("Waiting for controller commands...\n");
+    printf("Switch started successfully\n");
+    printf("Waiting for YAML config from controller...\n");
+
+    // 等待 YAML 配置就绪
+    pthread_mutex_lock(&ctx.config_mutex);
+    while (!ctx.config_ready) {
+        pthread_cond_wait(&ctx.config_cond, &ctx.config_mutex);
+    }
+    pthread_mutex_unlock(&ctx.config_mutex);
+
+    printf("Config received: fan_in=%d, is_spine=%d, root_conn=%d, bitmap_mask=0x%x\n",
+           ctx.fan_in, ctx.is_spine, ctx.root_conn, ctx.bitmap_mask);
 
     init_devices();
     
@@ -315,6 +339,6 @@ int main(int argc, char *argv[]) {
     // 清理资源
     switch_context_cleanup(&ctx);
 
-    TS_PRINTF("Switch stopped\n");
+    printf("Switch stopped\n");
     return 0;
 }

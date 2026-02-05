@@ -14,11 +14,11 @@ extern "C" {
 #define MAX_SWITCHES 8
 
 // 接收缓冲区配置
-// 每个连接需要 RECV_BUF_PER_CONN 个槽位（滑动窗口）
+// 每个连接需要 RECV_BUF_PER_CONN 个槽位（滑动窗口复用）
 // 支持最多 4 个连接（2 hosts per LEAF, 或 2 children per ROOT）
-#define RECV_BUF_PER_CONN 16384
+#define RECV_BUF_PER_CONN 8192
 #define RECV_BUF_MAX_CONNS 4
-#define RECV_BUF_COUNT (RECV_BUF_PER_CONN * RECV_BUF_MAX_CONNS)  // 65536 slots
+#define RECV_BUF_COUNT (RECV_BUF_PER_CONN * RECV_BUF_MAX_CONNS)  // 32768 slots
 #define RECV_BUF_SIZE  (64 * 1024)  // 64KB per message
 
 // QP 连接信息（用于 TCP 交换）

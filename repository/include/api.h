@@ -35,7 +35,7 @@
 #define INCCL_HEADER_LEN 8
 #define GID_IDX 1
 
-#define SLIDING_WINDOW_SIZE 4096  // 固定滑动窗口大小（消息数）
+#define SLIDING_WINDOW_SIZE 16384  // 固定滑动窗口大小（消息数），支持256MB测试
 #define WINDOW_SIZE (SLIDING_WINDOW_SIZE * 4096)  // 兼容旧代码
 #define MESSAGE_SIZE (4 * (PAYLOAD_LEN)) // 在一条信息中的字节数
 #define PAYLOAD_COUNT ((MESSAGE_SIZE) / (sizeof(int))) // 在一条信息中的uint32_t数量
@@ -103,6 +103,9 @@ struct inccl_communicator *inccl_communicator_create(struct inccl_group *group, 
 int inccl_communicator_destroy(struct inccl_communicator *comm);
 
 void inccl_allreduce_sendrecv(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
+
+// 简化版 AllReduce - 无控制包，直接发送数据（用于 non_termination_switch）
+void inccl_allreduce_simple(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
 
 void inccl_allreduce_write(struct inccl_communicator *comm, int32_t* src_data, uint32_t len, int32_t* dst_data);
 
