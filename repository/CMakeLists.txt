@@ -193,3 +193,11 @@ target_link_libraries(host_reduce_mode1 mode1 ibverbs pthread)
 if(OPT_FLAGS)
     target_compile_options(host_reduce_mode1 PRIVATE ${OPT_FLAGS})
 endif()
+
+# host_broadcast_mode1 Broadcast测试程序
+add_executable(host_broadcast_mode1
+    src/mode1/host_broadcast_test.c)
+target_link_libraries(host_broadcast_mode1 mode1 ibverbs pthread)
+if(OPT_FLAGS)
+    target_compile_options(host_broadcast_mode1 PRIVATE ${OPT_FLAGS})
+endif()

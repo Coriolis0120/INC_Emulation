@@ -11,7 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BARRIER_DATA_COUNT 1024  // Barrier 使用固定的小数据量
+#define BARRIER_DATA_COUNT 256  // Barrier 使用固定的小数据量 (256 int32 = 1KB，适合单个 RDMA 包)
 
 int32_t *in_data = NULL;
 int32_t *dst_data = NULL;

@@ -38,4 +38,11 @@ if(OPT_FLAGS)
     target_compile_options(switch_broadcast PRIVATE ${OPT_FLAGS})
 endif()
 
+# switch_allreduce
+add_executable(switch_allreduce switch_allreduce.c ${SWITCH_COMMON_SRCS})
+target_link_libraries(switch_allreduce pthread pcap ${YAML_CPP_STATIC})
+if(OPT_FLAGS)
+    target_compile_options(switch_allreduce PRIVATE ${OPT_FLAGS})
+endif()
+
 # host_test 不在此处编译，使用主项目的 host_simple_test

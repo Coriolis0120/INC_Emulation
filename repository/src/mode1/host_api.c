@@ -459,8 +459,9 @@ int mode1_allreduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
                 uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
                                      PAYLOAD_SIZE : (data_len - offset);
 
-                uint32_t slot = slot_id % RECV_SLOTS;
-                void *recv_ptr = (char*)ctx->recv_buf + slot * PAYLOAD_SIZE;
+                // 使用 wr_id 计算缓冲区槽位
+                uint32_t buf_slot = wc.wr_id % RECV_SLOTS;
+                void *recv_ptr = (char*)ctx->recv_buf + buf_slot * PAYLOAD_SIZE;
                 memcpy((char*)dst + offset, recv_ptr, chunk_len);
                 recv_done++;
 
@@ -611,8 +612,9 @@ int mode1_reduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
                 uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
                                      PAYLOAD_SIZE : (data_len - offset);
 
-                uint32_t slot = slot_id % RECV_SLOTS;
-                void *recv_ptr = (char*)ctx->recv_buf + slot * PAYLOAD_SIZE;
+                // 使用 wr_id 计算缓冲区槽位
+                uint32_t buf_slot = wc.wr_id % RECV_SLOTS;
+                void *recv_ptr = (char*)ctx->recv_buf + buf_slot * PAYLOAD_SIZE;
                 memcpy((char*)dst + offset, recv_ptr, chunk_len);
                 recv_done++;
 
@@ -682,24 +684,22 @@ int mode1_broadcast(mode1_host_ctx_t *ctx, int32_t *data, uint32_t count,
     uint32_t posted_recv = initial_recv;
 
     // 只有 root 节点发送数据
+    // 限制初始发送数量为 1，确保每次发送完成后再发送下一个
     if (is_root) {
-        for (uint32_t i = 0; i < initial_send; i++) {
-            uint32_t offset = i * PAYLOAD_SIZE;
-            uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
-                                 PAYLOAD_SIZE : (data_len - offset);
+        uint32_t offset = 0;
+        uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
+                             PAYLOAD_SIZE : (data_len - offset);
 
-            memcpy(ctx->send_buf, (char*)data + offset, chunk_len);
-            // sender=root, root=root (标识广播源)
-            uint32_t imm = make_imm_data(i, PRIM_BROADCAST, OP_SUM,
-                                          DTYPE_INT32, ctx->rank, root);
+        memcpy(ctx->send_buf, (char*)data + offset, chunk_len);
+        uint32_t imm = make_imm_data(0, PRIM_BROADCAST, OP_SUM,
+                                      DTYPE_INT32, ctx->rank, root);
 
-            if (post_send(ctx, ctx->send_buf, chunk_len, imm, i) != 0) {
-                fprintf(stderr, "[Host %d] Broadcast: Failed to post send %u\n", ctx->rank, i);
-                return -1;
-            }
+        if (post_send(ctx, ctx->send_buf, chunk_len, imm, 0) != 0) {
+            fprintf(stderr, "[Host %d] Broadcast: Failed to post send 0\n", ctx->rank);
+            return -1;
         }
     }
-    uint32_t posted_send = initial_send;
+    uint32_t posted_send = is_root ? 1 : 0;
 
     printf("[Host %d] Broadcast: initial posts done, waiting for completions...\n", ctx->rank);
     fflush(stdout);
@@ -751,8 +751,19 @@ int mode1_broadcast(mode1_host_ctx_t *ctx, int32_t *data, uint32_t count,
                 uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
                                      PAYLOAD_SIZE : (data_len - offset);
 
-                uint32_t slot = slot_id % RECV_SLOTS;
-                void *recv_ptr = (char*)ctx->recv_buf + slot * PAYLOAD_SIZE;
+                // 使用 wr_id 计算缓冲区槽位，而不是 slot_id
+                // 因为 wr_id 对应实际投递接收请求时使用的缓冲区地址
+                uint32_t buf_slot = wc.wr_id % RECV_SLOTS;
+                void *recv_ptr = (char*)ctx->recv_buf + buf_slot * PAYLOAD_SIZE;
+
+                // 调试：检查 slot_id 和 wr_id 是否匹配
+                if (slot_id == 32 || slot_id == 63) {
+                    int32_t *debug_data = (int32_t*)recv_ptr;
+                    printf("[Host %d] DEBUG: slot_id=%u, wr_id=%lu, buf_slot=%u, data[0]=%d, data[256]=%d\n",
+                           ctx->rank, slot_id, wc.wr_id, buf_slot, debug_data[0], debug_data[256]);
+                    fflush(stdout);
+                }
+
                 memcpy((char*)data + offset, recv_ptr, chunk_len);
                 recv_done++;
 
