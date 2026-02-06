@@ -648,12 +648,142 @@ int mode1_reduce(mode1_host_ctx_t *ctx, int32_t *src, uint32_t count,
     return 0;
 }
 
-// Broadcast 操作（占位实现）
+// Broadcast 操作 - root 节点发送数据，所有节点接收
 int mode1_broadcast(mode1_host_ctx_t *ctx, int32_t *data, uint32_t count,
                     int root) {
     if (!ctx || !data) return -1;
 
-    // TODO: 实现完整的 Broadcast
-    printf("[Host] Broadcast: count=%u, root=%d (not implemented)\n", count, root);
+    uint32_t data_len = count * sizeof(int32_t);
+    uint32_t msg_count = (data_len + PAYLOAD_SIZE - 1) / PAYLOAD_SIZE;
+    int is_root = (ctx->rank == root);
+
+    printf("[Host %d] Broadcast start: count=%u, data_len=%u, msg_count=%u, root=%d, is_root=%d\n",
+           ctx->rank, count, data_len, msg_count, root, is_root);
+    fflush(stdout);
+
+    // 限制初始投递的请求数
+    uint32_t initial_recv = (msg_count < MAX_OUTSTANDING) ? msg_count : MAX_OUTSTANDING;
+    uint32_t initial_send = is_root ?
+        ((msg_count < MAX_OUTSTANDING) ? msg_count : MAX_OUTSTANDING) : 0;
+
+    printf("[Host %d] Broadcast: initial_recv=%u, initial_send=%u\n",
+           ctx->rank, initial_recv, initial_send);
+    fflush(stdout);
+
+    // 所有节点都投递接收请求（包括 root，因为 root 也会收到广播）
+    for (uint32_t i = 0; i < initial_recv; i++) {
+        uint32_t slot = i % RECV_SLOTS;
+        void *recv_ptr = (char*)ctx->recv_buf + slot * PAYLOAD_SIZE;
+        if (post_recv(ctx, recv_ptr, PAYLOAD_SIZE, i) != 0) {
+            fprintf(stderr, "[Host %d] Broadcast: Failed to post recv %u\n", ctx->rank, i);
+            return -1;
+        }
+    }
+    uint32_t posted_recv = initial_recv;
+
+    // 只有 root 节点发送数据
+    if (is_root) {
+        for (uint32_t i = 0; i < initial_send; i++) {
+            uint32_t offset = i * PAYLOAD_SIZE;
+            uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
+                                 PAYLOAD_SIZE : (data_len - offset);
+
+            memcpy(ctx->send_buf, (char*)data + offset, chunk_len);
+            // sender=root, root=root (标识广播源)
+            uint32_t imm = make_imm_data(i, PRIM_BROADCAST, OP_SUM,
+                                          DTYPE_INT32, ctx->rank, root);
+
+            if (post_send(ctx, ctx->send_buf, chunk_len, imm, i) != 0) {
+                fprintf(stderr, "[Host %d] Broadcast: Failed to post send %u\n", ctx->rank, i);
+                return -1;
+            }
+        }
+    }
+    uint32_t posted_send = initial_send;
+
+    printf("[Host %d] Broadcast: initial posts done, waiting for completions...\n", ctx->rank);
+    fflush(stdout);
+
+    // 滑动窗口：等待完成并补充请求
+    struct ibv_wc wc;
+    uint32_t send_done = 0, recv_done = 0;
+    struct timeval start, now;
+    gettimeofday(&start, NULL);
+
+    // root 需要等待发送和接收，非 root 只等待接收
+    uint32_t expected_send = is_root ? msg_count : 0;
+
+    while (send_done < expected_send || recv_done < msg_count) {
+        int n = ibv_poll_cq(ctx->cq, 1, &wc);
+        if (n < 0) {
+            fprintf(stderr, "[Host %d] Broadcast: CQ poll error\n", ctx->rank);
+            return -1;
+        }
+        if (n > 0) {
+            if (wc.status != IBV_WC_SUCCESS) {
+                fprintf(stderr, "[Host %d] Broadcast: WC error: %d, opcode=%d, wr_id=%lu\n",
+                        ctx->rank, wc.status, wc.opcode, wc.wr_id);
+                return -1;
+            }
+            if (wc.opcode == IBV_WC_SEND && is_root) {
+                send_done++;
+                if (send_done % 1000 == 0 || send_done == msg_count) {
+                    printf("[Host %d] Broadcast: send_done=%u/%u\n",
+                           ctx->rank, send_done, msg_count);
+                    fflush(stdout);
+                }
+                // 补充发送请求
+                if (posted_send < msg_count) {
+                    uint32_t i = posted_send;
+                    uint32_t offset = i * PAYLOAD_SIZE;
+                    uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
+                                         PAYLOAD_SIZE : (data_len - offset);
+                    memcpy(ctx->send_buf, (char*)data + offset, chunk_len);
+                    uint32_t imm = make_imm_data(i, PRIM_BROADCAST, OP_SUM,
+                                                  DTYPE_INT32, ctx->rank, root);
+                    post_send(ctx, ctx->send_buf, chunk_len, imm, i);
+                    posted_send++;
+                }
+            } else if (wc.opcode == IBV_WC_RECV) {
+                uint32_t imm = ntohl(wc.imm_data);
+                uint32_t slot_id = (imm >> 12) & 0xFFFFF;
+                uint32_t offset = slot_id * PAYLOAD_SIZE;
+                uint32_t chunk_len = (offset + PAYLOAD_SIZE <= data_len) ?
+                                     PAYLOAD_SIZE : (data_len - offset);
+
+                uint32_t slot = slot_id % RECV_SLOTS;
+                void *recv_ptr = (char*)ctx->recv_buf + slot * PAYLOAD_SIZE;
+                memcpy((char*)data + offset, recv_ptr, chunk_len);
+                recv_done++;
+
+                if (recv_done % 1000 == 0 || recv_done == msg_count) {
+                    printf("[Host %d] Broadcast: recv_done=%u/%u, slot_id=%u\n",
+                           ctx->rank, recv_done, msg_count, slot_id);
+                    fflush(stdout);
+                }
+
+                // 补充接收请求
+                if (posted_recv < msg_count) {
+                    uint32_t new_slot = posted_recv % RECV_SLOTS;
+                    void *new_recv_ptr = (char*)ctx->recv_buf + new_slot * PAYLOAD_SIZE;
+                    post_recv(ctx, new_recv_ptr, PAYLOAD_SIZE, posted_recv);
+                    posted_recv++;
+                }
+            }
+        }
+
+        // 检查超时
+        gettimeofday(&now, NULL);
+        long elapsed = (now.tv_sec - start.tv_sec) * 1000000 +
+                       (now.tv_usec - start.tv_usec);
+        if (elapsed > TIMEOUT_US) {
+            fprintf(stderr, "[Host %d] Broadcast timeout: send=%u/%u recv=%u/%u\n",
+                    ctx->rank, send_done, expected_send, recv_done, msg_count);
+            return -1;
+        }
+    }
+
+    printf("[Host %d] Broadcast complete\n", ctx->rank);
+    fflush(stdout);
     return 0;
 }
